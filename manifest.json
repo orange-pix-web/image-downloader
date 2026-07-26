@@ -1,15 +1,18 @@
 {
   "manifest_version": 3,
-  "name": "GPT 图片顺序下载器",
-  "version": "2.2.0",
-  "description": "自动上传产品图和提示词，等待 ChatGPT 完整生成后按顺序下载。",
+  "name": "AI 图片顺序下载器",
+  "version": "3.0.0",
+  "description": "自动上传产品图和提示词，等待 ChatGPT 或豆包完整生成后按顺序下载。",
   "permissions": ["downloads", "activeTab", "storage", "tabs"],
   "host_permissions": [
     "https://chatgpt.com/*",
-    "https://chat.openai.com/*"
+    "https://chat.openai.com/*",
+    "https://www.doubao.com/*",
+    "https://*.doubaocdn.com/*",
+    "https://*.byteimg.com/*"
   ],
   "action": {
-    "default_title": "GPT 图片顺序下载器",
+    "default_title": "AI 图片顺序下载器",
     "default_popup": "popup.html"
   },
   "background": {
@@ -19,7 +22,8 @@
     {
       "matches": [
         "https://chatgpt.com/*",
-        "https://chat.openai.com/*"
+        "https://chat.openai.com/*",
+        "https://www.doubao.com/*"
       ],
       "js": ["content.js"],
       "run_at": "document_idle"
@@ -28,7 +32,11 @@
   "web_accessible_resources": [
     {
       "resources": ["dashboard.html", "dashboard.css", "dashboard.js"],
-      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"]
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://www.doubao.com/*"
+      ]
     }
   ]
 }

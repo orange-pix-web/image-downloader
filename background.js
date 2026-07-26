@@ -1,5 +1,6 @@
 const activeJobs = new Map();
 const HISTORY_KEY = "downloadedImageKeys";
+let armedNativeDownload = null;
 
 async function getDownloadedKeys() {
   const saved = await chrome.storage.local.get(HISTORY_KEY);
@@ -47,6 +48,45 @@ function cleanName(value, fallback) {
     .slice(0, 60);
   return cleaned || fallback;
 }
+
+chrome.downloads.onCreated.addListener((item) => {
+  if (
+    armedNativeDownload?.state === "armed" &&
+    Date.now() - armedNativeDownload.armedAt < 15000
+  ) {
+    armedNativeDownload.downloadId = item.id;
+    armedNativeDownload.state = "downloading";
+  }
+});
+
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  if (
+    armedNativeDownload &&
+    ["armed", "downloading"].includes(armedNativeDownload.state) &&
+    Date.now() - armedNativeDownload.armedAt < 15000 &&
+    (!armedNativeDownload.downloadId || armedNativeDownload.downloadId === item.id)
+  ) {
+    armedNativeDownload.downloadId = item.id;
+    armedNativeDownload.state = "downloading";
+    suggest({
+      filename: armedNativeDownload.filename,
+      conflictAction: "uniquify"
+    });
+    return;
+  }
+  suggest();
+});
+
+chrome.downloads.onChanged.addListener((delta) => {
+  if (!armedNativeDownload || delta.id !== armedNativeDownload.downloadId || !delta.state) return;
+  if (delta.state.current === "complete") {
+    armedNativeDownload.state = "complete";
+    rememberDownloaded(armedNativeDownload.key);
+  } else if (delta.state.current === "interrupted") {
+    armedNativeDownload.state = "error";
+    armedNativeDownload.error = delta.error?.current || "保存被中断";
+  }
+});
 
 async function runJob(jobId, images, options) {
   const folder = cleanName(options.folder, "ChatGPT图片");
@@ -125,5 +165,33 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ ok: true });
     });
     return true;
+  }
+
+  if (message?.type === "GPT_NATIVE_DOWNLOAD_ARM") {
+    if (armedNativeDownload && ["armed", "downloading"].includes(armedNativeDownload.state)) {
+      sendResponse({ ok: false, error: "已有原图保存任务正在进行" });
+      return;
+    }
+    const token = crypto.randomUUID();
+    armedNativeDownload = {
+      token,
+      filename: message.filename,
+      key: message.key,
+      armedAt: Date.now(),
+      state: "armed"
+    };
+    sendResponse({ ok: true, token });
+    return;
+  }
+
+  if (message?.type === "GPT_NATIVE_DOWNLOAD_STATUS") {
+    const job =
+      armedNativeDownload?.token === message.token
+        ? {
+            state: armedNativeDownload.state,
+            error: armedNativeDownload.error || null
+          }
+        : null;
+    sendResponse({ ok: true, job });
   }
 });

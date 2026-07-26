@@ -222,10 +222,12 @@ async function buildTasks() {
   log(`任务列表已生成，成功匹配 ${tasks.length} 项。`);
 }
 
-async function findChatTab() {
+async function findAiTab() {
   const tabs = await chrome.tabs.query({});
-  const candidates = tabs.filter((tab) => /^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(tab.url || ""));
-  if (!candidates.length) throw new Error("没有找到已打开的 ChatGPT 页面");
+  const candidates = tabs.filter((tab) =>
+    /^https:\/\/(chatgpt\.com|chat\.openai\.com|www\.doubao\.com)\//.test(tab.url || "")
+  );
+  if (!candidates.length) throw new Error("没有找到已打开的 ChatGPT 或豆包页面");
   return candidates.find((tab) => tab.active) || candidates[0];
 }
 
@@ -233,7 +235,7 @@ async function messageTab(tabId, message) {
   try {
     return await chrome.tabs.sendMessage(tabId, message);
   } catch (error) {
-    throw new Error("无法连接 ChatGPT 页面，请刷新该页面后重试");
+    throw new Error("无法连接 AI 对话页面，请刷新该页面后重试");
   }
 }
 
@@ -269,18 +271,52 @@ async function downloadTask(task, images) {
     ...image,
     order: task.startNumber + index
   }));
-  const result = await chrome.runtime.sendMessage({
-    type: "GPT_IMAGE_DOWNLOAD",
-    images: numberedImages,
-    options: { folder: "ChatGPT图片", prefix: task.product }
-  });
-  if (!result?.jobId) throw new Error("无法启动下载");
+  for (const image of numberedImages) {
+    if (image.downloadMethod === "doubao-save") {
+      const filename =
+        `豆包图片/${task.product}_${paddedNumber(image.order)}.png`;
+      const armed = await chrome.runtime.sendMessage({
+        type: "GPT_NATIVE_DOWNLOAD_ARM",
+        filename,
+        key: image.key
+      });
+      if (!armed?.ok) throw new Error(armed?.error || "无法准备豆包原图保存");
+      const tab = await findAiTab();
+      const saved = await messageTab(tab.id, { type: "GPT_DOUBAO_SAVE", key: image.key });
+      if (!saved?.ok) throw new Error(saved?.error || "豆包原图保存失败");
 
-  while (true) {
-    await sleep(500);
-    const status = await chrome.runtime.sendMessage({ type: "GPT_IMAGE_STATUS", jobId: result.jobId });
-    if (status.job?.state === "complete") return;
-    if (status.job?.state === "error") throw new Error(status.job.error);
+      const deadline = Date.now() + 60000;
+      while (Date.now() < deadline) {
+        await sleep(500);
+        const status = await chrome.runtime.sendMessage({
+          type: "GPT_NATIVE_DOWNLOAD_STATUS",
+          token: armed.token
+        });
+        if (status.job?.state === "complete") break;
+        if (status.job?.state === "error") throw new Error(status.job.error);
+      }
+      const finalStatus = await chrome.runtime.sendMessage({
+        type: "GPT_NATIVE_DOWNLOAD_STATUS",
+        token: armed.token
+      });
+      if (finalStatus.job?.state !== "complete") throw new Error("等待豆包原图保存超时");
+    } else {
+      const result = await chrome.runtime.sendMessage({
+        type: "GPT_IMAGE_DOWNLOAD",
+        images: [image],
+        options: {
+          folder: image.platform === "doubao" ? "豆包图片" : "ChatGPT图片",
+          prefix: task.product
+        }
+      });
+      if (!result?.jobId) throw new Error("无法启动下载");
+      while (true) {
+        await sleep(500);
+        const status = await chrome.runtime.sendMessage({ type: "GPT_IMAGE_STATUS", jobId: result.jobId });
+        if (status.job?.state === "complete") break;
+        if (status.job?.state === "error") throw new Error(status.job.error);
+      }
+    }
   }
 }
 
@@ -293,7 +329,7 @@ async function run() {
   stateBadge.textContent = "运行中";
 
   try {
-    const tab = await findChatTab();
+    const tab = await findAiTab();
     for (const task of tasks) {
       if (paused) break;
       if (task.status === "已完成") {

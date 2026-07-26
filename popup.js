@@ -19,8 +19,8 @@ async function scan() {
   statusEl.textContent = "正在扫描当前对话…";
   try {
     const tab = await currentTab();
-    if (!tab?.id || !/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(tab.url || "")) {
-      throw new Error("请先打开 ChatGPT 对话页面");
+    if (!tab?.id || !/^https:\/\/(chatgpt\.com|chat\.openai\.com|www\.doubao\.com)\//.test(tab.url || "")) {
+      throw new Error("请先打开 ChatGPT 或豆包对话页面");
     }
     const result = await chrome.tabs.sendMessage(tab.id, { type: "GPT_IMAGE_SCAN" });
     const allImages = result?.images || [];
@@ -95,8 +95,8 @@ rescanButton.addEventListener("click", scan);
 dashboardButton.addEventListener("click", async () => {
   try {
     const tab = await currentTab();
-    if (!tab?.id || !/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(tab.url || "")) {
-      throw new Error("请先打开 ChatGPT 页面");
+    if (!tab?.id || !/^https:\/\/(chatgpt\.com|chat\.openai\.com|www\.doubao\.com)\//.test(tab.url || "")) {
+      throw new Error("请先打开 ChatGPT 或豆包页面");
     }
     await chrome.tabs.sendMessage(tab.id, { type: "GPT_PANEL_OPEN" });
     window.close();
