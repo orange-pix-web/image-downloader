@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GPT 图片顺序下载器</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <h1>GPT 图片顺序下载器</h1>
+      <p id="status" class="status">正在检查当前页面…</p>
+
+      <label>
+        保存文件夹
+        <input id="folder" value="ChatGPT图片" maxlength="60" />
+      </label>
+      <label>
+        文件名前缀
+        <input id="prefix" value="GPT图片" maxlength="60" />
+      </label>
+
+      <button id="download" disabled>按顺序下载全部图片</button>
+      <button id="open-dashboard">打开自动生图任务管理器</button>
+      <button id="rescan" class="secondary">重新扫描</button>
+      <button id="clear-history" class="secondary danger">清空下载记录</button>
+      <p class="hint">文件将保存为 GPT图片_001.png、002.png……</p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GPT 自动生图任务管理器</title>
+    <link rel="stylesheet" href="dashboard.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1>GPT 自动生图任务管理器</h1>
+          <p>自动匹配产品图片和 Markdown，完整生成后再按产品名下载。</p>
+        </div>
+        <span id="run-state" class="badge">未开始</span>
+      </header>
+
+      <section class="panel setup">
+        <label class="picker">
+          <strong>① 选择产品图片（可多选）</strong>
+          <input id="images" type="file" accept="image/png,image/jpeg,image/webp" multiple />
+        </label>
+        <label class="picker">
+          <strong>② 选择提示词 Markdown（可多选）</strong>
+          <input id="prompts" type="file" accept=".md,text/markdown,text/plain" multiple />
+        </label>
+
+        <div class="settings">
+          <label>轮询间隔（秒）<input id="poll-seconds" type="number" min="5" max="300" value="30" /></label>
+          <label>最大等待（分钟）<input id="timeout-minutes" type="number" min="5" max="180" value="40" /></label>
+          <label>稳定确认次数<input id="stable-rounds" type="number" min="1" max="5" value="2" /></label>
+        </div>
+
+        <div class="actions">
+          <button id="build">生成任务列表</button>
+          <button id="start" disabled>开始执行</button>
+          <button id="pause" class="secondary" disabled>暂停</button>
+          <button id="clear-history" class="danger">清空全部历史</button>
+        </div>
+        <p class="note">Markdown 中的代码块会作为完整提示词发送；“生成9张”等文字会自动识别为预期图片数量。仅当末尾存在已设定的固定结尾句时自动移除。</p>
+      </section>
+
+      <section class="panel">
+        <h2>任务列表</h2>
+        <div id="summary">尚未导入文件。</div>
+        <table>
+          <thead><tr><th>#</th><th>产品</th><th>提示词文件</th><th>预期</th><th>起始编号</th><th>文件范围</th><th>状态</th></tr></thead>
+          <tbody id="tasks"></tbody>
+        </table>
+      </section>
+
+      <section class="panel">
+        <h2>运行日志</h2>
+        <pre id="log"></pre>
+      </section>
+    </main>
+    <script src="dashboard.js"></script>
+  </body>
+</html>
