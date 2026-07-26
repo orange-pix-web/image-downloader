@@ -2,6 +2,19 @@ const activeJobs = new Map();
 const HISTORY_KEY = "downloadedImageKeys";
 let armedNativeDownload = null;
 
+function normalizedDownloadExtension(item) {
+  const mime = String(item.mime || "").toLowerCase();
+  if (mime.includes("png")) return "png";
+  if (mime.includes("webp")) return "webp";
+  if (mime.includes("gif")) return "gif";
+  if (mime.includes("jpeg") || mime.includes("jpg") || mime.includes("jfif")) return "jpg";
+
+  const match = String(item.filename || item.url || "").match(/\.(png|webp|gif|jpe?g|jfif)(?:$|[?#])/i);
+  if (!match) return "png";
+  const ext = match[1].toLowerCase();
+  return ext === "jpeg" || ext === "jfif" ? "jpg" : ext;
+}
+
 async function getDownloadedKeys() {
   const saved = await chrome.storage.local.get(HISTORY_KEY);
   return new Set(saved[HISTORY_KEY] || []);
@@ -68,8 +81,9 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   ) {
     armedNativeDownload.downloadId = item.id;
     armedNativeDownload.state = "downloading";
+    const extension = normalizedDownloadExtension(item);
     suggest({
-      filename: armedNativeDownload.filename,
+      filename: `${armedNativeDownload.filenameBase}.${extension}`,
       conflictAction: "uniquify"
     });
     return;
@@ -175,7 +189,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const token = crypto.randomUUID();
     armedNativeDownload = {
       token,
-      filename: message.filename,
+      filenameBase: message.filenameBase,
       key: message.key,
       armedAt: Date.now(),
       state: "armed"

@@ -273,11 +273,11 @@ async function downloadTask(task, images) {
   }));
   for (const image of numberedImages) {
     if (image.downloadMethod === "doubao-save") {
-      const filename =
-        `豆包图片/${task.product}_${paddedNumber(image.order)}.png`;
+      const filenameBase =
+        `豆包图片/${task.product}_${paddedNumber(image.order)}`;
       const armed = await chrome.runtime.sendMessage({
         type: "GPT_NATIVE_DOWNLOAD_ARM",
-        filename,
+        filenameBase,
         key: image.key
       });
       if (!armed?.ok) throw new Error(armed?.error || "无法准备豆包原图保存");

@@ -70,8 +70,8 @@ function getDoubaoGeneratedImages() {
       key,
       order: images.length + 1,
       platform: "doubao",
-      // 原生网格展示地址带水印，必须走豆包预览窗口的“保存”。
-      downloadMethod: key.startsWith("doubao:generated:") ? "doubao-save" : "url"
+      // 短链和原生网格都只作为定位依据，下载统一走豆包预览窗口的“保存”。
+      downloadMethod: "doubao-save"
     });
   }
   return images;
@@ -280,7 +280,12 @@ async function saveDoubaoImage(key) {
 
   const target = getDoubaoGeneratedImages().find((image) => image.key === key);
   if (!target) throw new Error("找不到待保存的豆包生成图");
-  const allImages = Array.from(document.querySelectorAll('img.image-Q7dBqW[src*="rc_gen_image"]'));
+  const allImages = Array.from(
+    document.querySelectorAll(
+      'img.image-Q7dBqW[src*="rc_gen_image"],' +
+      'img.image-Q7dBqW[src^="https://aka.doubaocdn.com/s/"]'
+    )
+  );
   const img = allImages.find((element) => doubaoImageKey(element.currentSrc || element.src) === key);
   if (!img) throw new Error("找不到豆包图片节点");
   (img.closest(".clickable-axeVcZ") || img).click();
