@@ -168,6 +168,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({
         ok: true,
         images: pending,
+        items: images.map((image) => ({
+          ...image,
+          downloaded: downloadedKeys.has(image.key)
+        })),
         downloadedCount: images.length - pending.length
       });
     });

@@ -20,7 +20,28 @@
         <input id="prefix" value="GPT图片" maxlength="60" />
       </label>
 
-      <button id="download" disabled>按顺序下载全部图片</button>
+      <section id="picker" class="picker" hidden>
+        <div class="picker-title">
+          <strong>选择要下载的图片</strong>
+          <span id="selection-count">已选 0 张</span>
+        </div>
+        <div class="selection-actions">
+          <button id="select-new" type="button" class="mini">只选未下载</button>
+          <button id="select-all" type="button" class="mini">全选</button>
+          <button id="invert" type="button" class="mini">反选</button>
+          <button id="select-none" type="button" class="mini">取消</button>
+        </div>
+        <div class="range-picker">
+          <span>编号范围</span>
+          <input id="range-start" type="number" min="1" placeholder="起" />
+          <span>–</span>
+          <input id="range-end" type="number" min="1" placeholder="止" />
+          <button id="select-range" type="button" class="mini">选择</button>
+        </div>
+        <div id="image-list" class="image-list"></div>
+      </section>
+
+      <button id="download" disabled>下载已选择的图片</button>
       <button id="open-dashboard">打开自动生图任务管理器</button>
       <button id="rescan" class="secondary">重新扫描</button>
       <button id="clear-history" class="secondary danger">清空下载记录</button>
