@@ -1,6 +1,7 @@
 const activeJobs = new Map();
 const HISTORY_KEY = "downloadedImageKeys";
 let armedNativeDownload = null;
+let armedApiDownload = null;
 
 function normalizedDownloadExtension(item) {
   const mime = String(item.mime || "").toLowerCase();
@@ -69,6 +70,15 @@ chrome.downloads.onCreated.addListener((item) => {
   ) {
     armedNativeDownload.downloadId = item.id;
     armedNativeDownload.state = "downloading";
+    return;
+  }
+  if (
+    armedApiDownload?.state === "armed" &&
+    Date.now() - armedApiDownload.armedAt < 15000 &&
+    item.url === armedApiDownload.url
+  ) {
+    armedApiDownload.downloadId = item.id;
+    armedApiDownload.state = "downloading";
   }
 });
 
@@ -88,17 +98,41 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
     });
     return;
   }
+  if (
+    armedApiDownload &&
+    ["armed", "downloading"].includes(armedApiDownload.state) &&
+    Date.now() - armedApiDownload.armedAt < 15000 &&
+    item.url === armedApiDownload.url &&
+    (!armedApiDownload.downloadId || armedApiDownload.downloadId === item.id)
+  ) {
+    armedApiDownload.downloadId = item.id;
+    armedApiDownload.state = "downloading";
+    suggest({
+      filename: armedApiDownload.filename,
+      conflictAction: "uniquify"
+    });
+    return;
+  }
   suggest();
 });
 
 chrome.downloads.onChanged.addListener((delta) => {
-  if (!armedNativeDownload || delta.id !== armedNativeDownload.downloadId || !delta.state) return;
-  if (delta.state.current === "complete") {
-    armedNativeDownload.state = "complete";
-    rememberDownloaded(armedNativeDownload.key);
-  } else if (delta.state.current === "interrupted") {
-    armedNativeDownload.state = "error";
-    armedNativeDownload.error = delta.error?.current || "保存被中断";
+  if (!delta.state) return;
+
+  if (armedNativeDownload && delta.id === armedNativeDownload.downloadId) {
+    if (delta.state.current === "complete") {
+      armedNativeDownload.state = "complete";
+      rememberDownloaded(armedNativeDownload.key);
+    } else if (delta.state.current === "interrupted") {
+      armedNativeDownload.state = "error";
+      armedNativeDownload.error = delta.error?.current || "保存被中断";
+    }
+  }
+
+  if (armedApiDownload && delta.id === armedApiDownload.downloadId) {
+    if (delta.state.current === "complete" || delta.state.current === "interrupted") {
+      armedApiDownload = null;
+    }
   }
 });
 
@@ -121,13 +155,31 @@ async function runJob(jobId, images, options) {
       filename
     });
 
-    const downloadId = await chrome.downloads.download({
+    armedApiDownload = {
       url: images[i].url,
       filename,
-      conflictAction: "uniquify",
-      saveAs: false
-    });
+      armedAt: Date.now(),
+      state: "armed",
+      downloadId: null
+    };
+    let downloadId;
+    try {
+      downloadId = await chrome.downloads.download({
+        url: images[i].url,
+        filename,
+        conflictAction: "uniquify",
+        saveAs: false
+      });
+      if (armedApiDownload) {
+        armedApiDownload.downloadId ||= downloadId;
+        armedApiDownload.state = "downloading";
+      }
+    } catch (error) {
+      armedApiDownload = null;
+      throw error;
+    }
     await waitForDownload(downloadId);
+    if (armedApiDownload?.downloadId === downloadId) armedApiDownload = null;
     await rememberDownloaded(images[i].key);
   }
 
@@ -186,6 +238,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.type === "GPT_NATIVE_DOWNLOAD_ARM") {
+    if (
+      armedNativeDownload?.state === "armed" &&
+      Date.now() - armedNativeDownload.armedAt >= 15000
+    ) {
+      armedNativeDownload = null;
+    }
     if (armedNativeDownload && ["armed", "downloading"].includes(armedNativeDownload.state)) {
       sendResponse({ ok: false, error: "已有原图保存任务正在进行" });
       return;
