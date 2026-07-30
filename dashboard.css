@@ -13,6 +13,8 @@ header p, .note { color: #68736f; }
 .settings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 .settings label { font-size: 13px; font-weight: 700; }
 .settings input { width: 100%; margin-top: 6px; padding: 9px; border: 1px solid #ccd5d2; border-radius: 7px; }
+.settings .check-setting { display: flex; align-items: center; gap: 7px; padding-top: 20px; }
+.settings .check-setting input { width: auto; margin: 0; padding: 0; }
 .actions { display: flex; gap: 10px; flex-wrap: wrap; }
 button { padding: 10px 17px; border: 0; border-radius: 8px; background: #0c9974; color: white; font-weight: 700; cursor: pointer; }
 button:disabled { opacity: .45; cursor: not-allowed; }
@@ -42,6 +44,8 @@ body.embedded .picker { padding: 10px; font-size: 12px; }
 body.embedded .settings { grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
 body.embedded .settings label { font-size: 11px; }
 body.embedded .settings input { padding: 7px 5px; }
+body.embedded .settings .check-setting { padding-top: 17px; }
+body.embedded .settings .check-setting input { width: auto; padding: 0; }
 body.embedded .actions { gap: 6px; }
 body.embedded button { padding: 8px 10px; font-size: 12px; }
 body.embedded .note { margin: 0; font-size: 11px; }

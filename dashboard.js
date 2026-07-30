@@ -8,13 +8,95 @@ const startButton = $("#start");
 const pauseButton = $("#pause");
 const stateBadge = $("#run-state");
 
-if (window.top !== window || new URLSearchParams(location.search).has("embedded")) {
+if (
+  window.top !== window ||
+  new URLSearchParams(location.search).has("embedded") ||
+  new URLSearchParams(location.search).has("manager")
+) {
   document.body.classList.add("embedded");
 }
 
 let tasks = [];
 let paused = false;
 let running = false;
+const DB_NAME = "ai-image-downloader";
+const DB_VERSION = 1;
+const QUEUE_STORE = "queue";
+
+function openQueueDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(QUEUE_STORE)) {
+        db.createObjectStore(QUEUE_STORE);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function saveQueue() {
+  const db = await openQueueDb();
+  await new Promise((resolve, reject) => {
+    const transaction = db.transaction(QUEUE_STORE, "readwrite");
+    transaction.objectStore(QUEUE_STORE).put(tasks, "tasks");
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error);
+  });
+  db.close();
+}
+
+async function loadQueue() {
+  const db = await openQueueDb();
+  const saved = await new Promise((resolve, reject) => {
+    const request = db.transaction(QUEUE_STORE, "readonly")
+      .objectStore(QUEUE_STORE).get("tasks");
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  });
+  db.close();
+  return saved;
+}
+
+async function clearQueue() {
+  const db = await openQueueDb();
+  await new Promise((resolve, reject) => {
+    const transaction = db.transaction(QUEUE_STORE, "readwrite");
+    transaction.objectStore(QUEUE_STORE).delete("tasks");
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error);
+  });
+  db.close();
+}
+
+function managerSettings() {
+  return {
+    pollSeconds: Math.max(5, Number($("#poll-seconds").value) || 30),
+    timeoutMinutes: Math.max(5, Number($("#timeout-minutes").value) || 40),
+    stableRounds: Math.max(1, Number($("#stable-rounds").value) || 2),
+    autoRefresh: $("#auto-refresh").checked,
+    refreshMinutes: Math.max(1, Number($("#refresh-minutes").value) || 5),
+    maxRefreshes: Math.max(1, Number($("#max-refreshes").value) || 2)
+  };
+}
+
+async function saveManagerSettings() {
+  await chrome.storage.local.set({ managerSettings: managerSettings() });
+}
+
+async function restoreManagerSettings() {
+  const saved = await chrome.storage.local.get("managerSettings");
+  const value = saved.managerSettings;
+  if (!value) return;
+  $("#poll-seconds").value = value.pollSeconds ?? 30;
+  $("#timeout-minutes").value = value.timeoutMinutes ?? 40;
+  $("#stable-rounds").value = value.stableRounds ?? 2;
+  $("#auto-refresh").checked = value.autoRefresh !== false;
+  $("#refresh-minutes").value = value.refreshMinutes ?? 5;
+  $("#max-refreshes").value = value.maxRefreshes ?? 2;
+}
 
 function log(message) {
   const time = new Date().toLocaleTimeString();
@@ -175,6 +257,7 @@ async function setProductStartNumber(product, startNumber) {
     next = task.endNumber + 1;
   }
   render();
+  await saveQueue();
   log(`${product} 起始编号已设为 ${paddedNumber(startNumber)}。`);
 }
 
@@ -219,16 +302,48 @@ async function buildTasks() {
     nextNumber.set(product, endNumber + 1);
   }
   render();
+  await saveQueue();
   log(`任务列表已生成，成功匹配 ${tasks.length} 项。`);
 }
 
-async function findAiTab() {
+async function findAiTab(preferredId) {
+  if (!preferredId) {
+    const saved = await chrome.storage.local.get("managerTargetTabId");
+    preferredId = saved.managerTargetTabId;
+  }
+  if (preferredId) {
+    try {
+      const preferred = await chrome.tabs.get(preferredId);
+      if (/^https:\/\/(chatgpt\.com|chat\.openai\.com|www\.doubao\.com)\//.test(preferred.url || "")) {
+        return preferred;
+      }
+    } catch {
+      // 标签页已关闭，继续查找其他可用页面。
+    }
+  }
   const tabs = await chrome.tabs.query({});
   const candidates = tabs.filter((tab) =>
     /^https:\/\/(chatgpt\.com|chat\.openai\.com|www\.doubao\.com)\//.test(tab.url || "")
   );
   if (!candidates.length) throw new Error("没有找到已打开的 ChatGPT 或豆包页面");
   return candidates.find((tab) => tab.active) || candidates[0];
+}
+
+async function waitForPageConnection(tabId, timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab.status === "complete") {
+        const state = await chrome.tabs.sendMessage(tabId, { type: "GPT_AUTOMATION_STATE" });
+        if (state?.ok) return state;
+      }
+    } catch {
+      // 页面刷新期间内容脚本尚未注入。
+    }
+    await sleep(1000);
+  }
+  throw new Error("页面刷新后60秒内未能重新连接");
 }
 
 async function messageTab(tabId, message) {
@@ -239,27 +354,74 @@ async function messageTab(tabId, message) {
   }
 }
 
-async function waitForAllImages(tabId, baselineKeys, expected) {
-  const pollMs = Math.max(5, Number($("#poll-seconds").value) || 30) * 1000;
-  const timeoutMs = Math.max(5, Number($("#timeout-minutes").value) || 40) * 60 * 1000;
-  const stableNeeded = Math.max(1, Number($("#stable-rounds").value) || 2);
-  const startedAt = Date.now();
-  let stable = 0;
-  let lastSignature = "";
+async function waitForAllImages(tabId, baselineKeys, expected, task) {
+  const settings = managerSettings();
+  const pollMs = settings.pollSeconds * 1000;
+  const timeoutMs = settings.timeoutMinutes * 60 * 1000;
+  const refreshMs = settings.refreshMinutes * 60 * 1000;
+  const runtime = task.runtime ||= {};
+  runtime.stage = "waiting";
+  runtime.tabId = tabId;
+  runtime.baselineKeys = Array.from(baselineKeys);
+  runtime.waitStartedAt ||= Date.now();
+  runtime.lastProgressAt ||= Date.now();
+  runtime.refreshCount ||= 0;
+  runtime.lastCount ||= 0;
+  runtime.lastSignature ||= "";
+  runtime.observedKeys ||= [];
+  let stable = runtime.stable || 0;
+  await saveQueue();
 
-  while (!paused && Date.now() - startedAt < timeoutMs) {
+  while (!paused && Date.now() - runtime.waitStartedAt < timeoutMs) {
     await sleep(pollMs);
-    const state = await messageTab(tabId, { type: "GPT_AUTOMATION_STATE" });
+    let state;
+    try {
+      state = await messageTab(tabId, { type: "GPT_AUTOMATION_STATE" });
+    } catch {
+      log("页面连接暂时中断，等待内容脚本重新连接。");
+      state = await waitForPageConnection(tabId);
+    }
     const fresh = (state.images || []).filter((image) => !baselineKeys.has(image.key));
     const signature = fresh.map((image) => image.key).join("|");
+    const observed = new Set(runtime.observedKeys);
+    const newlyObserved = fresh.filter((image) => !observed.has(image.key));
 
-    if (!state.generating && fresh.length >= expected && signature === lastSignature) stable += 1;
+    if (newlyObserved.length > 0) {
+      for (const image of newlyObserved) observed.add(image.key);
+      runtime.observedKeys = Array.from(observed);
+      runtime.lastProgressAt = Date.now();
+      runtime.lastCount = Math.max(runtime.lastCount, fresh.length);
+      runtime.refreshCount = 0;
+      await saveQueue();
+    }
+
+    if (!state.generating && fresh.length >= expected && signature === runtime.lastSignature) stable += 1;
     else stable = 0;
-    lastSignature = signature;
-    log(`检测：已出现 ${fresh.length}/${expected} 张，生成中=${state.generating ? "是" : "否"}，稳定=${stable}/${stableNeeded}`);
+    runtime.lastSignature = signature;
+    runtime.stable = stable;
+    log(`检测：已出现 ${fresh.length}/${expected} 张，生成中=${state.generating ? "是" : "否"}，稳定=${stable}/${settings.stableRounds}`);
 
-    if (!state.generating && fresh.length >= expected && stable >= stableNeeded) {
+    if (!state.generating && fresh.length >= expected && stable >= settings.stableRounds) {
       return fresh.slice(0, expected).map((image, index) => ({ ...image, order: index + 1 }));
+    }
+
+    const noProgressFor = Date.now() - runtime.lastProgressAt;
+    if (
+      settings.autoRefresh &&
+      refreshMs > 0 &&
+      noProgressFor >= refreshMs
+    ) {
+      if (runtime.refreshCount >= settings.maxRefreshes) {
+        throw new Error(`连续无进展，已达到自动刷新上限 ${settings.maxRefreshes} 次`);
+      }
+      runtime.refreshCount += 1;
+      runtime.lastProgressAt = Date.now();
+      runtime.stable = 0;
+      await saveQueue();
+      log(`连续 ${settings.refreshMinutes} 分钟没有新图片，正在自动刷新页面（${runtime.refreshCount}/${settings.maxRefreshes}）。`);
+      await chrome.tabs.reload(tabId);
+      await waitForPageConnection(tabId);
+      log("页面已重新连接，继续等待当前任务；不会重新发送提示词。");
     }
   }
   if (paused) throw new Error("任务已暂停");
@@ -271,7 +433,15 @@ async function downloadTask(task, images) {
     ...image,
     order: task.startNumber + index
   }));
-  for (const image of numberedImages) {
+  const filtered = await chrome.runtime.sendMessage({
+    type: "GPT_IMAGE_FILTER_HISTORY",
+    images: numberedImages
+  });
+  const pendingImages = (filtered.items || numberedImages).filter((image) => !image.downloaded);
+  if (pendingImages.length !== numberedImages.length) {
+    log(`恢复下载时已跳过 ${numberedImages.length - pendingImages.length} 张有历史记录的图片。`);
+  }
+  for (const image of pendingImages) {
     if (image.downloadMethod === "doubao-save") {
       const filenameBase =
         `豆包图片/${task.product}_${paddedNumber(image.order)}`;
@@ -329,7 +499,6 @@ async function run() {
   stateBadge.textContent = "运行中";
 
   try {
-    const tab = await findAiTab();
     for (const task of tasks) {
       if (paused) break;
       if (task.status === "已完成") {
@@ -338,31 +507,74 @@ async function run() {
       }
       task.status = "执行中";
       render();
+      await saveQueue();
       log(`开始：${task.product}，预期 ${task.expected} 张。`);
 
       try {
-        const before = await messageTab(tab.id, { type: "GPT_AUTOMATION_STATE" });
-        const baseline = new Set((before.images || []).map((image) => image.key));
-        const dataUrl = await fileToDataUrl(task.image);
-        const sent = await messageTab(tab.id, {
-          type: "GPT_AUTOMATION_SEND",
-          image: { dataUrl, name: task.image.name, type: task.image.type },
-          prompt: task.prompt
-        });
-        if (!sent?.ok) throw new Error(sent?.error || "发送失败");
-        log("图片和提示词已发送，开始轮询。");
+        const tab = await findAiTab(task.runtime?.tabId);
+        let images;
+        if (task.runtime?.stage === "sending") {
+          throw new Error("任务在发送阶段被中断，已停止以避免重复发送，请检查页面后重新建立任务");
+        }
+        if (task.runtime?.stage?.startsWith("downloading") && task.runtime.readyImages?.length) {
+          images = task.runtime.readyImages;
+          log("已恢复下载阶段，将跳过有下载历史的图片，不会重新发送提示词。");
+        } else {
+          let baseline;
+          if (task.runtime?.stage?.startsWith("waiting") && task.runtime.baselineKeys?.length) {
+            baseline = new Set(task.runtime.baselineKeys);
+            log("已恢复等待中的任务，继续检测图片，不会重新发送提示词。");
+            await waitForPageConnection(tab.id);
+          } else {
+            const before = await messageTab(tab.id, { type: "GPT_AUTOMATION_STATE" });
+            baseline = new Set((before.images || []).map((image) => image.key));
+            task.runtime = {
+              stage: "sending",
+              tabId: tab.id,
+              baselineKeys: Array.from(baseline),
+              waitStartedAt: Date.now(),
+              lastProgressAt: Date.now(),
+              refreshCount: 0,
+              lastCount: 0,
+              lastSignature: ""
+            };
+            await saveQueue();
+            const dataUrl = await fileToDataUrl(task.image);
+            const sent = await messageTab(tab.id, {
+              type: "GPT_AUTOMATION_SEND",
+              image: { dataUrl, name: task.image.name, type: task.image.type },
+              prompt: task.prompt
+            });
+            if (!sent?.ok) throw new Error(sent?.error || "发送失败");
+            task.runtime.stage = "waiting";
+            await saveQueue();
+            log("图片和提示词已发送，开始轮询。");
+          }
 
-        const images = await waitForAllImages(tab.id, baseline, task.expected);
+          images = await waitForAllImages(tab.id, baseline, task.expected, task);
+          task.runtime.stage = "downloading";
+          task.runtime.readyImages = images;
+          await saveQueue();
+        }
         log(`全部 ${images.length} 张已出现，现在开始下载。`);
         await downloadTask(task, images);
         await rememberTask(task);
         task.status = "已完成";
+        task.runtime = { stage: "complete" };
+        await saveQueue();
         log(
           `完成：${task.product}，文件名 ${task.product}_${paddedNumber(task.startNumber)}–` +
           `${paddedNumber(task.endNumber)}。`
         );
       } catch (error) {
         task.status = `失败：${error.message}`;
+        task.runtime ||= {};
+        task.runtime.stage = task.runtime.stage?.startsWith("waiting")
+          ? "waiting-paused"
+          : task.runtime.stage?.startsWith("downloading")
+            ? "downloading-paused"
+            : "paused";
+        await saveQueue();
         log(task.status);
         paused = true;
       }
@@ -384,10 +596,38 @@ pauseButton.addEventListener("click", () => {
   paused = true;
   stateBadge.textContent = "正在暂停";
   log("收到暂停指令，将停止进入下一步。");
+  saveQueue();
 });
 $("#clear-history").addEventListener("click", async () => {
   await chrome.storage.local.remove(["completedAutomationTasks", "automationHistory", "downloadedImageKeys"]);
   tasks.forEach((task) => { task.status = "待执行"; });
+  tasks.forEach((task) => { task.runtime = null; });
+  await saveQueue();
   render();
   log("全部任务历史和图片下载历史已清空。");
 });
+
+for (const input of document.querySelectorAll(".settings input")) {
+  input.addEventListener("change", saveManagerSettings);
+}
+
+async function initializeManager() {
+  await restoreManagerSettings();
+  tasks = await loadQueue();
+  if (tasks.length) {
+    render();
+    log(`已从本地恢复 ${tasks.length} 个任务。`);
+    const resumable = tasks.find(
+      (task) =>
+        task.status === "执行中" &&
+        (task.runtime?.stage?.startsWith("waiting") ||
+          task.runtime?.stage?.startsWith("downloading"))
+    );
+    if (resumable) {
+      log("检测到刷新前未完成的任务，即将自动恢复。");
+      setTimeout(run, 500);
+    }
+  }
+}
+
+initializeManager().catch((error) => log(`恢复任务失败：${error.message}`));

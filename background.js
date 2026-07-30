@@ -3,6 +3,25 @@ const HISTORY_KEY = "downloadedImageKeys";
 let armedNativeDownload = null;
 let armedApiDownload = null;
 
+async function openManagerWindow() {
+  const dashboardBase = chrome.runtime.getURL("dashboard.html");
+  const allTabs = await chrome.tabs.query({});
+  const existing = allTabs.find((tab) => tab.url?.startsWith(dashboardBase));
+  if (existing?.windowId) {
+    await chrome.windows.update(existing.windowId, { focused: true });
+    await chrome.tabs.update(existing.id, { active: true });
+    return existing.windowId;
+  }
+  const created = await chrome.windows.create({
+    url: `${dashboardBase}?manager=1`,
+    type: "popup",
+    width: 480,
+    height: 860,
+    focused: true
+  });
+  return created.id;
+}
+
 function normalizedDownloadExtension(item) {
   const mime = String(item.mime || "").toLowerCase();
   if (mime.includes("png")) return "png";
@@ -190,7 +209,18 @@ async function runJob(jobId, images, options) {
   });
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "GPT_OPEN_MANAGER") {
+    const targetTabId = message.tabId || sender.tab?.id;
+    if (targetTabId) {
+      chrome.storage.local.set({ managerTargetTabId: targetTabId });
+    }
+    openManagerWindow()
+      .then((windowId) => sendResponse({ ok: true, windowId }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
   if (message?.type === "GPT_IMAGE_DOWNLOAD") {
     const jobId = crypto.randomUUID();
     runJob(jobId, message.images || [], message.options || {}).catch((error) => {

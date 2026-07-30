@@ -142,20 +142,22 @@ function mountAutomationPanel() {
   close.textContent = "×";
   const frame = document.createElement("iframe");
   frame.title = "GPT 自动生图任务管理器";
-  frame.src = chrome.runtime.getURL("dashboard.html?embedded=1");
+  frame.src = "about:blank";
 
+  const openManager = () => chrome.runtime.sendMessage({ type: "GPT_OPEN_MANAGER" });
   const setOpen = (open) => {
-    shell.classList.toggle("open", open);
-    launcher.style.display = open ? "none" : "block";
+    if (open) openManager();
+    shell.classList.remove("open");
+    launcher.style.display = "block";
   };
-  launcher.addEventListener("click", () => setOpen(true));
+  launcher.addEventListener("click", openManager);
   close.addEventListener("click", () => setOpen(false));
   bar.append(title, close);
   shell.append(bar, frame);
   shadow.append(style, launcher, shell);
   document.documentElement.appendChild(host);
 
-  host.openPanel = () => setOpen(true);
+  host.openPanel = openManager;
 }
 
 mountAutomationPanel();

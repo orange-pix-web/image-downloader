@@ -183,10 +183,11 @@ document.querySelector("#select-range").addEventListener("click", () => {
 dashboardButton.addEventListener("click", async () => {
   try {
     const tab = await currentTab();
-    if (!tab?.id || !/^https:\/\/(chatgpt\.com|chat\.openai\.com|www\.doubao\.com)\//.test(tab.url || "")) {
-      throw new Error("请先打开 ChatGPT 或豆包页面");
-    }
-    await chrome.tabs.sendMessage(tab.id, { type: "GPT_PANEL_OPEN" });
+    const result = await chrome.runtime.sendMessage({
+      type: "GPT_OPEN_MANAGER",
+      tabId: tab?.id
+    });
+    if (!result?.ok) throw new Error(result?.error || "无法打开任务管理器");
     window.close();
   } catch (error) {
     statusEl.textContent = error?.message?.includes("Receiving end")
