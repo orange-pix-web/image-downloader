@@ -3,15 +3,17 @@ const HISTORY_KEY = "downloadedImageKeys";
 let armedNativeDownload = null;
 let armedApiDownload = null;
 
-async function openManagerWindow() {
+async function openManagerWindow(targetTabId) {
   const dashboardBase = chrome.runtime.getURL("dashboard.html");
   const allTabs = await chrome.tabs.query({});
   const existing = allTabs.find((tab) => tab.url?.startsWith(dashboardBase));
   if (existing?.windowId) {
     await chrome.windows.update(existing.windowId, { focused: true });
     await chrome.tabs.update(existing.id, { active: true });
-    return existing.windowId;
+    // 管理器已打开时只聚焦窗口，不能被其他 AI 页面悄悄改绑。
+    return { windowId: existing.windowId, reused: true };
   }
+  if (targetTabId) await chrome.storage.local.set({ managerTargetTabId: targetTabId });
   const created = await chrome.windows.create({
     url: `${dashboardBase}?manager=1`,
     type: "popup",
@@ -19,7 +21,7 @@ async function openManagerWindow() {
     height: 860,
     focused: true
   });
-  return created.id;
+  return { windowId: created.id, reused: false };
 }
 
 function normalizedDownloadExtension(item) {
@@ -212,11 +214,8 @@ async function runJob(jobId, images, options) {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "GPT_OPEN_MANAGER") {
     const targetTabId = message.tabId || sender.tab?.id;
-    if (targetTabId) {
-      chrome.storage.local.set({ managerTargetTabId: targetTabId });
-    }
-    openManagerWindow()
-      .then((windowId) => sendResponse({ ok: true, windowId }))
+    openManagerWindow(targetTabId)
+      .then((result) => sendResponse({ ok: true, ...result }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }

@@ -7,6 +7,8 @@ const logEl = $("#log");
 const startButton = $("#start");
 const pauseButton = $("#pause");
 const stateBadge = $("#run-state");
+const targetTabSelect = $("#target-tab");
+const bindingDetail = $("#binding-detail");
 
 if (
   window.top !== window ||
@@ -19,6 +21,7 @@ if (
 let tasks = [];
 let paused = false;
 let running = false;
+let boundTabId = null;
 const DB_NAME = "ai-image-downloader";
 const DB_VERSION = 1;
 const QUEUE_STORE = "queue";
@@ -106,6 +109,60 @@ function log(message) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isAiPage(url) {
+  return /^https:\/\/(chatgpt\.com|chat\.openai\.com|www\.doubao\.com)\//.test(url || "");
+}
+
+async function refreshTabList(preferredId = boundTabId) {
+  const tabs = (await chrome.tabs.query({})).filter((tab) => isAiPage(tab.url));
+  targetTabSelect.innerHTML = "";
+  for (const tab of tabs) {
+    const option = document.createElement("option");
+    option.value = String(tab.id);
+    option.textContent = `${tab.title || "未命名页面"} — ${new URL(tab.url).hostname}`;
+    option.title = tab.url;
+    targetTabSelect.appendChild(option);
+  }
+  if (!tabs.length) {
+    targetTabSelect.add(new Option("没有找到 ChatGPT 或豆包页面", ""));
+    bindingDetail.textContent = "请先打开一个 AI 对话页面，再刷新列表。";
+    return;
+  }
+  const selected = tabs.find((tab) => tab.id === Number(preferredId));
+  targetTabSelect.value = String(selected?.id || tabs[0].id);
+  await showBinding();
+}
+
+async function showBinding() {
+  if (!boundTabId) {
+    bindingDetail.textContent = "尚未绑定。请选择页面并点击“绑定所选页面”。";
+    return;
+  }
+  try {
+    const tab = await chrome.tabs.get(boundTabId);
+    if (!isAiPage(tab.url)) throw new Error();
+    bindingDetail.textContent = `已锁定：${tab.title || "未命名页面"} ｜ ${tab.url}`;
+    targetTabSelect.value = String(boundTabId);
+  } catch {
+    bindingDetail.textContent = `原绑定标签页（ID ${boundTabId}）已关闭或不再是 AI 页面，请手动重新绑定。`;
+  }
+}
+
+async function bindSelectedTab() {
+  const tabId = Number(targetTabSelect.value);
+  if (!tabId) return log("没有可绑定的 AI 页面。");
+  const tab = await chrome.tabs.get(tabId);
+  if (!isAiPage(tab.url)) return log("所选标签页已失效，请刷新页面列表。");
+  boundTabId = tabId;
+  await chrome.storage.local.set({ managerTargetTabId: tabId });
+  for (const task of tasks) {
+    if (task.status !== "执行中" && task.status !== "已完成") task.targetTabId = tabId;
+  }
+  await saveQueue();
+  await showBinding();
+  log(`已手动绑定生图页面：${tab.title || tab.url}`);
 }
 
 function productName(filename) {
@@ -270,6 +327,17 @@ async function buildTasks() {
     log("请选择产品图片和 Markdown 文件。");
     return;
   }
+  if (!boundTabId) {
+    log("请先在上方选择并绑定生图页面。");
+    return;
+  }
+  try {
+    const bound = await chrome.tabs.get(boundTabId);
+    if (!isAiPage(bound.url)) throw new Error();
+  } catch {
+    log("绑定的生图标签页已失效，请重新绑定后再生成任务列表。");
+    return;
+  }
 
   const imageMap = new Map(images.map((file) => [productName(file.name), file]));
   const done = await completedIds();
@@ -299,7 +367,8 @@ async function buildTasks() {
       expected,
       startNumber,
       endNumber,
-      status: done.has(id) ? "已完成" : "待执行"
+      status: done.has(id) ? "已完成" : "待执行",
+      targetTabId: boundTabId
     });
     nextNumber.set(product, endNumber + 1);
   }
@@ -309,26 +378,15 @@ async function buildTasks() {
 }
 
 async function findAiTab(preferredId) {
-  if (!preferredId) {
-    const saved = await chrome.storage.local.get("managerTargetTabId");
-    preferredId = saved.managerTargetTabId;
+  const tabId = Number(preferredId || boundTabId);
+  if (!tabId) throw new Error("尚未绑定生图标签页，请在管理器顶部手动绑定");
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (!isAiPage(tab.url)) throw new Error();
+    return tab;
+  } catch {
+    throw new Error(`绑定的生图标签页（ID ${tabId}）已关闭或失效；任务已停止，不会切换到其他页面`);
   }
-  if (preferredId) {
-    try {
-      const preferred = await chrome.tabs.get(preferredId);
-      if (/^https:\/\/(chatgpt\.com|chat\.openai\.com|www\.doubao\.com)\//.test(preferred.url || "")) {
-        return preferred;
-      }
-    } catch {
-      // 标签页已关闭，继续查找其他可用页面。
-    }
-  }
-  const tabs = await chrome.tabs.query({});
-  const candidates = tabs.filter((tab) =>
-    /^https:\/\/(chatgpt\.com|chat\.openai\.com|www\.doubao\.com)\//.test(tab.url || "")
-  );
-  if (!candidates.length) throw new Error("没有找到已打开的 ChatGPT 或豆包页面");
-  return candidates.find((tab) => tab.active) || candidates[0];
 }
 
 async function waitForPageConnection(tabId, timeoutMs = 60000) {
@@ -513,7 +571,7 @@ async function run() {
       log(`开始：${task.product}，预期 ${task.expected} 张。`);
 
       try {
-        const tab = await findAiTab(task.runtime?.tabId);
+        const tab = await findAiTab(task.runtime?.tabId || task.targetTabId);
         let images;
         if (task.runtime?.stage === "sending") {
           throw new Error("任务在发送阶段被中断，已停止以避免重复发送，请检查页面后重新建立任务");
@@ -593,6 +651,8 @@ async function run() {
 }
 
 $("#build").addEventListener("click", buildTasks);
+$("#refresh-tabs").addEventListener("click", () => refreshTabList());
+$("#bind-tab").addEventListener("click", bindSelectedTab);
 startButton.addEventListener("click", run);
 pauseButton.addEventListener("click", () => {
   paused = true;
@@ -615,6 +675,9 @@ for (const input of document.querySelectorAll(".settings input")) {
 
 async function initializeManager() {
   await restoreManagerSettings();
+  const savedBinding = await chrome.storage.local.get("managerTargetTabId");
+  boundTabId = Number(savedBinding.managerTargetTabId) || null;
+  await refreshTabList(boundTabId);
   tasks = await loadQueue();
   if (tasks.length) {
     render();

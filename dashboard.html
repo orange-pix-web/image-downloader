@@ -17,6 +17,15 @@
       </header>
 
       <section class="panel setup">
+        <div class="tab-binding">
+          <strong>当前绑定的生图页面</strong>
+          <div class="binding-row">
+            <select id="target-tab"><option value="">正在读取页面…</option></select>
+            <button id="refresh-tabs" type="button" class="secondary">刷新列表</button>
+            <button id="bind-tab" type="button">绑定所选页面</button>
+          </div>
+          <p id="binding-detail" class="note">任务只会发送到这里，不会自动切换到其他标签页。</p>
+        </div>
         <label class="picker">
           <strong>① 选择产品图片（可多选）</strong>
           <input id="images" type="file" accept="image/png,image/jpeg,image/webp" multiple />

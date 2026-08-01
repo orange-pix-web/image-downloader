@@ -8,6 +8,10 @@ header p, .note { color: #68736f; }
 .badge { padding: 7px 13px; border-radius: 999px; background: #e3e8e6; font-weight: 700; }
 .panel { margin: 16px 0; padding: 22px; border: 1px solid #dde5e2; border-radius: 14px; background: white; box-shadow: 0 4px 18px rgba(20,50,40,.05); }
 .setup { display: grid; gap: 16px; }
+.tab-binding { padding: 12px; border: 1px solid #b9d9cf; border-radius: 10px; background: #f2fbf8; }
+.binding-row { display: flex; gap: 8px; margin-top: 9px; }
+.binding-row select { min-width: 0; flex: 1; padding: 9px; border: 1px solid #aebdb7; border-radius: 7px; background: white; }
+.tab-binding .note { margin: 8px 0 0; overflow-wrap: anywhere; }
 .picker { padding: 14px; border: 1px dashed #aebdb7; border-radius: 10px; }
 .picker input { display: block; margin-top: 10px; }
 .settings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
@@ -41,6 +45,9 @@ body.embedded header p { margin: 5px 0 8px; font-size: 12px; }
 body.embedded .badge { display: inline-block; padding: 5px 9px; font-size: 12px; }
 body.embedded .panel { margin: 10px 0; padding: 13px; border-radius: 10px; box-shadow: none; }
 body.embedded .picker { padding: 10px; font-size: 12px; }
+body.embedded .tab-binding { padding: 10px; font-size: 12px; }
+body.embedded .binding-row { flex-wrap: wrap; gap: 6px; }
+body.embedded .binding-row select { flex-basis: 100%; }
 body.embedded .settings { grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
 body.embedded .settings label { font-size: 11px; }
 body.embedded .settings input { padding: 7px 5px; }
