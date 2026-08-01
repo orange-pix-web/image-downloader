@@ -111,7 +111,9 @@ function sleep(ms) {
 function productName(filename) {
   return filename
     .replace(/\.[^.]+$/, "")
-    .replace(/[-_ ]*(生图)?提示词(?:[-_ ]*v?\d+(?:\.\d+)*)?$/i, "")
+    // 支持 -生图提示词-v2、-生图提示词-第01组、_提示词_第二组等后缀。
+    // 只从靠近文件名末尾的“提示词”标记开始删除，保留前面的完整产品名。
+    .replace(/[-_ ]*(?:生图)?提示词(?:[-_ ].*)?$/i, "")
     .trim();
 }
 
