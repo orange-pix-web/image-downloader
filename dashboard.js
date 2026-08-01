@@ -81,7 +81,8 @@ function managerSettings() {
     stableRounds: Math.max(1, Number($("#stable-rounds").value) || 2),
     autoRefresh: $("#auto-refresh").checked,
     refreshMinutes: Math.max(1, Number($("#refresh-minutes").value) || 5),
-    maxRefreshes: Math.max(1, Number($("#max-refreshes").value) || 2)
+    maxRefreshes: Math.max(1, Number($("#max-refreshes").value) || 2),
+    newChatEachTask: $("#new-chat-each-task").checked
   };
 }
 
@@ -99,6 +100,7 @@ async function restoreManagerSettings() {
   $("#auto-refresh").checked = value.autoRefresh !== false;
   $("#refresh-minutes").value = value.refreshMinutes ?? 5;
   $("#max-refreshes").value = value.maxRefreshes ?? 2;
+  $("#new-chat-each-task").checked = value.newChatEachTask === true;
 }
 
 function log(message) {
@@ -406,6 +408,27 @@ async function waitForPageConnection(tabId, timeoutMs = 60000) {
   throw new Error("页面刷新后60秒内未能重新连接");
 }
 
+function newConversationUrl(url) {
+  const parsed = new URL(url);
+  if (parsed.hostname === "chatgpt.com" || parsed.hostname === "chat.openai.com") {
+    // 自定义 GPT 的对话地址为 /g/{GPT标识}/c/{对话标识}，新对话需保留 /g/{GPT标识}。
+    const customGpt = parsed.pathname.match(/^(\/g\/[^/]+)/);
+    return `${parsed.origin}${customGpt ? customGpt[1] : "/"}`;
+  }
+  if (parsed.hostname === "www.doubao.com") return `${parsed.origin}/chat/`;
+  throw new Error("当前绑定页面不支持自动新建对话");
+}
+
+async function openFreshConversation(tab) {
+  const url = newConversationUrl(tab.url);
+  log(`正在打开新对话：${url}`);
+  await chrome.tabs.update(tab.id, { url });
+  await waitForPageConnection(tab.id);
+  // 页面连接成功后稍候片刻，让输入框和上传控件完成初始化。
+  await sleep(1200);
+  return chrome.tabs.get(tab.id);
+}
+
 async function messageTab(tabId, message) {
   try {
     return await chrome.tabs.sendMessage(tabId, message);
@@ -586,6 +609,15 @@ async function run() {
             log("已恢复等待中的任务，继续检测图片，不会重新发送提示词。");
             await waitForPageConnection(tab.id);
           } else {
+            if (managerSettings().newChatEachTask) {
+              task.runtime = {
+                stage: "opening-conversation",
+                tabId: tab.id
+              };
+              await saveQueue();
+              await openFreshConversation(tab);
+              log("新对话已就绪，准备上传产品图和提示词。");
+            }
             const before = await messageTab(tab.id, { type: "GPT_AUTOMATION_STATE" });
             baseline = new Set((before.images || []).map((image) => image.key));
             task.runtime = {

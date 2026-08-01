@@ -42,6 +42,7 @@
           <label>无进展刷新（分钟）<input id="refresh-minutes" type="number" min="1" max="60" value="5" /></label>
           <label>最多自动刷新<input id="max-refreshes" type="number" min="1" max="10" value="2" /></label>
           <label class="check-setting"><input id="auto-refresh" type="checkbox" checked />启用自动刷新</label>
+          <label class="check-setting"><input id="new-chat-each-task" type="checkbox" />每个任务使用新对话</label>
         </div>
 
         <div class="actions">
@@ -50,7 +51,7 @@
           <button id="pause" class="secondary" disabled>暂停</button>
           <button id="clear-history" class="danger">清空全部历史</button>
         </div>
-        <p class="note">Markdown 中的代码块会作为完整提示词发送；“生成9张”等文字会自动识别为预期图片数量。仅当末尾存在已设定的固定结尾句时自动移除。</p>
+        <p class="note">Markdown 中的代码块会作为完整提示词发送；“生成9张”等文字会自动识别为预期图片数量。开启“每个任务使用新对话”后，每次发送前会在已绑定标签页进入新对话；自定义 GPT 身份会保留。</p>
       </section>
 
       <section class="panel">
