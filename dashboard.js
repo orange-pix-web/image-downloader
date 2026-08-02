@@ -176,6 +176,27 @@ function productName(filename) {
     .trim();
 }
 
+function matchProductImage(promptProduct, imageEntries) {
+  const exact = imageEntries.filter((entry) => entry.product === promptProduct);
+  if (exact.length === 1) return { image: exact[0].file, matchedProduct: exact[0].product, mode: "exact" };
+  if (exact.length > 1) return { ambiguous: exact.map((entry) => entry.file.name) };
+
+  // 兼容“鸽虫净-无文案产品图提示词-第01组.md”对应“鸽虫净.png”。
+  // 只接受产品名之后紧跟分隔符的前缀，避免“产品A”误匹配“产品AB”。
+  const candidates = imageEntries
+    .filter((entry) => new RegExp(`^${escapeRegExp(entry.product)}[-_ ]`).test(promptProduct))
+    .sort((a, b) => b.product.length - a.product.length);
+  if (!candidates.length) return null;
+  const longest = candidates[0].product.length;
+  const best = candidates.filter((entry) => entry.product.length === longest);
+  if (best.length > 1) return { ambiguous: best.map((entry) => entry.file.name) };
+  return { image: best[0].file, matchedProduct: best[0].product, mode: "prefix" };
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function extractPrompt(text) {
   const fenced = text.match(/```(?:text|txt)?\s*([\s\S]*?)```/i);
   let prompt = (fenced ? fenced[1] : text).trim();
@@ -341,7 +362,7 @@ async function buildTasks() {
     return;
   }
 
-  const imageMap = new Map(images.map((file) => [productName(file.name), file]));
+  const imageEntries = images.map((file) => ({ product: productName(file.name), file }));
   const done = await completedIds();
   const savedStarts = await chrome.storage.local.get("productStartNumbers");
   const productStarts = savedStarts.productStartNumbers || {};
@@ -350,10 +371,18 @@ async function buildTasks() {
 
   for (const promptFile of prompts) {
     const product = productName(promptFile.name);
-    const image = imageMap.get(product);
+    const match = matchProductImage(product, imageEntries);
+    if (match?.ambiguous) {
+      log(`匹配冲突：${promptFile.name} 同时匹配 ${match.ambiguous.join("、")}，请调整文件名后重试。`);
+      continue;
+    }
+    const image = match?.image;
     if (!image) {
       log(`未匹配：${promptFile.name} 找不到同名产品图片（识别产品名：${product}）。`);
       continue;
+    }
+    if (match.mode === "prefix") {
+      log(`前缀匹配：${promptFile.name} → ${image.name}（产品名：${match.matchedProduct}）。`);
     }
     const rawPromptFile = await promptFile.text();
     const prompt = extractPrompt(rawPromptFile);
