@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AI 图片顺序下载器",
-  "version": "5.0.0",
+  "version": "5.1.0",
   "description": "自动配对参考图、产品图和提示词，等待 ChatGPT 或豆包完整生成后按顺序下载。",
   "permissions": ["downloads", "activeTab", "storage", "tabs"],
   "host_permissions": [

@@ -71,8 +71,14 @@
           <label class="wide-field">固定提示词（所有任务共用）
             <textarea id="fixed-prompt" rows="3" placeholder="例如：画面比例1:1，高清商业摄影，包装文字准确。"></textarea>
           </label>
+          <label class="wide-field">参考图禁用文字（所有产品共用，用顿号、逗号或换行分隔）
+            <textarea id="forbidden-reference-text" rows="2" placeholder="例如：原品牌、旧品名、旧活动文案"></textarea>
+          </label>
+          <label class="wide-field">按产品设置旧文字（每行：目标产品=参考图旧文字）
+            <textarea id="product-text-rules" rows="3" placeholder="禽益生=禽一片&#10;鸽虫净=鸽虫清、旧品牌名"></textarea>
+          </label>
           <label id="custom-template-wrap" class="wide-field hidden">自定义模板
-            <textarea id="custom-template" rows="7" placeholder="支持 {产品名}、{品牌名}、{指定文案}、{Markdown提示词}、{参考图数量}、{产品图序号}、{生成数量}"></textarea>
+            <textarea id="custom-template" rows="7" placeholder="支持 {产品名}、{品牌名}、{指定文案}、{禁用文字}、{文字替换要求}、{Markdown提示词}、{参考图数量}、{产品图序号}、{生成数量}"></textarea>
           </label>
         </div>
 

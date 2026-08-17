@@ -91,6 +91,8 @@ function managerSettings() {
     presetCount: Math.max(1, Math.min(20, Number($("#preset-count").value) || 1)),
     fixedPosition: $("#fixed-position").value,
     fixedPrompt: $("#fixed-prompt").value.trim(),
+    forbiddenReferenceText: $("#forbidden-reference-text").value.trim(),
+    productTextRules: $("#product-text-rules").value.trim(),
     customTemplate: $("#custom-template").value
   };
 }
@@ -117,6 +119,8 @@ async function restoreManagerSettings() {
   $("#preset-count").value = value.presetCount || 1;
   $("#fixed-position").value = value.fixedPosition || "append";
   $("#fixed-prompt").value = value.fixedPrompt || "";
+  $("#forbidden-reference-text").value = value.forbiddenReferenceText || "";
+  $("#product-text-rules").value = value.productTextRules || "";
   $("#custom-template").value = value.customTemplate || "";
   updatePresetVisibility();
 }
@@ -239,12 +243,36 @@ const PRESET_LABELS = {
   custom: "自定义模板"
 };
 
+function splitForbiddenText(value) {
+  return value.split(/[、,，;；\n]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+function forbiddenTextForProduct(product, settings) {
+  const words = splitForbiddenText(settings.forbiddenReferenceText || "");
+  for (const line of (settings.productTextRules || "").split(/\r?\n/)) {
+    const separator = line.search(/[=＝:：]/);
+    if (separator < 0) continue;
+    const target = line.slice(0, separator).trim();
+    if (target !== product) continue;
+    words.push(...splitForbiddenText(line.slice(separator + 1)));
+  }
+  return Array.from(new Set(words));
+}
+
+function textReplacementRequirement(product, forbiddenWords) {
+  if (!forbiddenWords.length) return "";
+  const listed = forbiddenWords.map((word) => `【${word}】`).join("、");
+  return `参考图禁用文字：${listed}。必须彻底删除这些旧产品名、旧品牌或旧文案，不得在生成图片的任何位置保留、变形、谐写、缩写或部分沿用。目标产品名称统一为【${product}】，产品包装、品牌Logo、标签和文字仅以最后一张产品图为准。输出前逐处检查，确保禁用文字完全不存在。`;
+}
+
 function replaceTemplateVariables(template, variables) {
-  return template.replace(/\{(产品名|品牌名|指定文案|Markdown提示词|参考图数量|产品图序号|生成数量)\}/g, (_, key) => variables[key] ?? "");
+  return template.replace(/\{(产品名|品牌名|指定文案|禁用文字|文字替换要求|Markdown提示词|参考图数量|产品图序号|生成数量)\}/g, (_, key) => variables[key] ?? "");
 }
 
 function buildTaskPrompt(markdownPrompt, product, referenceCount, expected, settings) {
   const productImageIndex = referenceCount + 1;
+  const forbiddenWords = forbiddenTextForProduct(product, settings);
+  const replacementRequirement = textReplacementRequirement(product, forbiddenWords);
   const variables = {
     产品名: product,
     品牌名: settings.brandName || "以产品图包装为准",
@@ -252,7 +280,9 @@ function buildTaskPrompt(markdownPrompt, product, referenceCount, expected, sett
     Markdown提示词: markdownPrompt,
     参考图数量: String(referenceCount),
     产品图序号: String(productImageIndex),
-    生成数量: String(expected)
+    生成数量: String(expected),
+    禁用文字: forbiddenWords.join("、"),
+    文字替换要求: replacementRequirement
   };
   let prompt = markdownPrompt;
 
@@ -274,6 +304,9 @@ function buildTaskPrompt(markdownPrompt, product, referenceCount, expected, sett
     if (settings.fixedPosition === "replace") prompt = fixed;
     else if (settings.fixedPosition === "prepend") prompt = `${fixed}\n\n${prompt}`.trim();
     else prompt = `${prompt}\n\n${fixed}`.trim();
+  }
+  if (replacementRequirement && !prompt.includes(replacementRequirement)) {
+    prompt = `${prompt}\n\n${replacementRequirement}`.trim();
   }
   return prompt.trim();
 }
@@ -351,6 +384,7 @@ async function rememberTask(task) {
     promptFile: task.promptFile,
     promptPreset: task.promptPreset || "original",
     referenceFiles: (task.referenceImages || []).map((file) => file.name),
+    forbiddenWords: task.forbiddenWords || [],
     count: task.expected,
     startNumber: task.startNumber,
     endNumber: task.endNumber,
@@ -376,7 +410,8 @@ function render() {
     row.innerHTML = `<td>${index + 1}</td><td></td><td></td><td></td><td>${task.expected}</td><td></td><td class="file-range"></td><td class="${statusClass}"></td>`;
     row.children[1].textContent = task.product;
     row.children[2].textContent = task.promptFile;
-    row.children[3].textContent = `${task.referenceImages?.length || 0}张 / ${PRESET_LABELS[task.promptPreset] || "原始 Markdown"}`;
+    row.children[3].textContent = `${task.referenceImages?.length || 0}张 / ${PRESET_LABELS[task.promptPreset] || "原始 Markdown"}` +
+      (task.forbiddenWords?.length ? ` / 禁词:${task.forbiddenWords.join("、")}` : "");
     if (firstForProduct) {
       const input = document.createElement("input");
       input.className = "start-number";
@@ -501,6 +536,7 @@ async function buildTasks() {
     const rawPromptFile = await promptFile.text();
     const markdownPrompt = extractPrompt(rawPromptFile);
     const expected = prompts.length ? expectedCount(rawPromptFile) : promptSettings.presetCount;
+    const forbiddenWords = forbiddenTextForProduct(product, promptSettings);
     const prompt = buildTaskPrompt(markdownPrompt, product, referenceImages.length, expected, promptSettings);
     if (!prompt) {
       log(`提示词为空：${promptFile.name}，已跳过。`);
@@ -512,7 +548,7 @@ async function buildTasks() {
     const endNumber = startNumber + expected - 1;
     const id = await makeTaskId(baseId, startNumber);
     tasks.push({
-      id, baseId, product, image, referenceImages, prompt,
+      id, baseId, product, image, referenceImages, prompt, forbiddenWords,
       promptPreset: promptSettings.promptPreset,
       promptFile: promptFile.name,
       // 在清理固定结尾句前识别数量，避免删除文案影响预期图片数。
