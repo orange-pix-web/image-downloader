@@ -171,19 +171,20 @@ async function dataUrlToFile(dataUrl, filename, mimeType) {
   return new File([blob], filename, { type: mimeType || blob.type || "image/png" });
 }
 
-async function uploadAndSend(image, prompt) {
+async function uploadAndSend(images, prompt) {
+  if (!images.length) throw new Error("没有收到待上传图片");
   const upload = document.querySelector('#upload-files, input[type="file"][multiple]');
   const editor = document.querySelector('#prompt-textarea[contenteditable="true"]');
   if (!upload || !editor) throw new Error("找不到上传控件或提示词输入框");
 
-  const file = await dataUrlToFile(image.dataUrl, image.name, image.type);
+  const files = await Promise.all(images.map((image) => dataUrlToFile(image.dataUrl, image.name, image.type)));
   const transfer = new DataTransfer();
-  transfer.items.add(file);
+  for (const file of files) transfer.items.add(file);
   upload.files = transfer.files;
   upload.dispatchEvent(new Event("change", { bubbles: true }));
 
   // 等待网页读取附件并生成预览。
-  await sleep(1800);
+  await sleep(1800 + Math.max(0, files.length - 1) * 500);
   editor.focus();
   document.execCommand("selectAll", false);
   document.execCommand("insertText", false, prompt);
@@ -194,7 +195,7 @@ async function uploadAndSend(image, prompt) {
   }));
 
   let submit = null;
-  const readyDeadline = Date.now() + 60000;
+  const readyDeadline = Date.now() + 120000;
   while (Date.now() < readyDeadline) {
     submit = document.querySelector("#composer-submit-button");
     if (
@@ -225,7 +226,8 @@ function setTextareaValue(textarea, value) {
   textarea.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
-async function uploadAndSendDoubao(image, prompt) {
+async function uploadAndSendDoubao(images, prompt) {
+  if (!images.length) throw new Error("没有收到待上传图片");
   const uploads = Array.from(document.querySelectorAll('input[type="file"][multiple]'));
   const upload =
     uploads.find((input) => /\.(png|jpe?g|webp)/i.test(input.accept || "")) ||
@@ -235,12 +237,12 @@ async function uploadAndSendDoubao(image, prompt) {
     document.querySelector('textarea[placeholder="发消息..."]');
   if (!upload || !editor) throw new Error("找不到豆包上传控件或提示词输入框");
 
-  const file = await dataUrlToFile(image.dataUrl, image.name, image.type);
+  const files = await Promise.all(images.map((image) => dataUrlToFile(image.dataUrl, image.name, image.type)));
   const transfer = new DataTransfer();
-  transfer.items.add(file);
+  for (const file of files) transfer.items.add(file);
   upload.files = transfer.files;
   upload.dispatchEvent(new Event("change", { bubbles: true }));
-  await sleep(2200);
+  await sleep(2200 + Math.max(0, files.length - 1) * 500);
 
   editor.focus();
   if (editor instanceof HTMLTextAreaElement) {
@@ -343,7 +345,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const sender = location.hostname === "www.doubao.com"
       ? uploadAndSendDoubao
       : uploadAndSend;
-    sender(message.image, message.prompt)
+    const images = message.images || (message.image ? [message.image] : []);
+    sender(images, message.prompt)
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;

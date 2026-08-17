@@ -31,9 +31,50 @@
           <input id="images" type="file" accept="image/png,image/jpeg,image/webp" multiple />
         </label>
         <label class="picker">
-          <strong>② 选择提示词 Markdown（可多选）</strong>
+          <strong>② 选择参考图片（可选，可多选）</strong>
+          <input id="references" type="file" accept="image/png,image/jpeg,image/webp" multiple />
+        </label>
+        <label class="picker">
+          <strong>③ 选择提示词 Markdown（可多选）</strong>
           <input id="prompts" type="file" accept=".md,text/markdown,text/plain" multiple />
         </label>
+
+        <div class="prompt-builder">
+          <strong>提示词预设</strong>
+          <div class="prompt-grid">
+            <label>生图模式
+              <select id="prompt-preset">
+                <option value="original">原始 Markdown</option>
+                <option value="replace">产品与品牌替换</option>
+                <option value="composition">仅参考构图重新生成</option>
+                <option value="custom">自定义模板</option>
+              </select>
+            </label>
+            <label>参考图配对
+              <select id="reference-mode">
+                <option value="auto">自动：单张共用，多张同名</option>
+                <option value="common">全部参考图用于每个产品</option>
+                <option value="same-name">仅按产品名配对</option>
+              </select>
+            </label>
+            <label>品牌名（可选）<input id="brand-name" type="text" placeholder="默认以产品图包装为准" /></label>
+            <label>指定文案（可选）<input id="specified-copy" type="text" placeholder="需要出现在图片中的文案" /></label>
+            <label>无 Markdown 时生成数量<input id="preset-count" type="number" min="1" max="20" value="1" /></label>
+            <label>固定提示词位置
+              <select id="fixed-position">
+                <option value="append">追加到末尾</option>
+                <option value="prepend">放在开头</option>
+                <option value="replace">替代 Markdown</option>
+              </select>
+            </label>
+          </div>
+          <label class="wide-field">固定提示词（所有任务共用）
+            <textarea id="fixed-prompt" rows="3" placeholder="例如：画面比例1:1，高清商业摄影，包装文字准确。"></textarea>
+          </label>
+          <label id="custom-template-wrap" class="wide-field hidden">自定义模板
+            <textarea id="custom-template" rows="7" placeholder="支持 {产品名}、{品牌名}、{指定文案}、{Markdown提示词}、{参考图数量}、{产品图序号}、{生成数量}"></textarea>
+          </label>
+        </div>
 
         <div class="settings">
           <label>轮询间隔（秒）<input id="poll-seconds" type="number" min="5" max="300" value="30" /></label>
@@ -58,7 +99,7 @@
         <h2>任务列表</h2>
         <div id="summary">尚未导入文件。</div>
         <table>
-          <thead><tr><th>#</th><th>产品</th><th>提示词文件</th><th>预期</th><th>起始编号</th><th>文件范围</th><th>状态</th></tr></thead>
+          <thead><tr><th>#</th><th>产品</th><th>提示词文件</th><th>参考图/预设</th><th>预期</th><th>起始编号</th><th>文件范围</th><th>状态</th></tr></thead>
           <tbody id="tasks"></tbody>
         </table>
       </section>

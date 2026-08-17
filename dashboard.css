@@ -14,6 +14,12 @@ header p, .note { color: #68736f; }
 .tab-binding .note { margin: 8px 0 0; overflow-wrap: anywhere; }
 .picker { padding: 14px; border: 1px dashed #aebdb7; border-radius: 10px; }
 .picker input { display: block; margin-top: 10px; }
+.prompt-builder { display: grid; gap: 10px; padding: 14px; border: 1px solid #d8dfdc; border-radius: 10px; background: #fafcfb; }
+.prompt-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.prompt-grid label, .wide-field { color: #42504b; font-size: 12px; font-weight: 700; }
+.prompt-grid input, .prompt-grid select, .wide-field textarea { width: 100%; margin-top: 6px; padding: 9px; border: 1px solid #ccd5d2; border-radius: 7px; background: white; font: inherit; }
+.wide-field textarea { resize: vertical; font-weight: 400; line-height: 1.45; }
+.hidden { display: none; }
 .settings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 .settings label { font-size: 13px; font-weight: 700; }
 .settings input { width: 100%; margin-top: 6px; padding: 9px; border: 1px solid #ccd5d2; border-radius: 7px; }
@@ -35,7 +41,7 @@ th { color: #64706c; font-size: 12px; }
 .status-running { color: #b76b00; font-weight: 700; }
 .status-error { color: #b42318; font-weight: 700; }
 pre { min-height: 150px; max-height: 340px; overflow: auto; padding: 14px; border-radius: 8px; background: #17201d; color: #d8ebe4; white-space: pre-wrap; line-height: 1.55; }
-@media (max-width: 720px) { .settings { grid-template-columns: 1fr; } main { width: calc(100% - 20px); } }
+@media (max-width: 720px) { .settings, .prompt-grid { grid-template-columns: 1fr; } main { width: calc(100% - 20px); } }
 
 body.embedded { background: #f3f6f5; }
 body.embedded main { width: auto; margin: 0; padding: 12px; }
@@ -45,6 +51,9 @@ body.embedded header p { margin: 5px 0 8px; font-size: 12px; }
 body.embedded .badge { display: inline-block; padding: 5px 9px; font-size: 12px; }
 body.embedded .panel { margin: 10px 0; padding: 13px; border-radius: 10px; box-shadow: none; }
 body.embedded .picker { padding: 10px; font-size: 12px; }
+body.embedded .prompt-builder { padding: 10px; }
+body.embedded .prompt-grid { grid-template-columns: 1fr 1fr; gap: 6px; }
+body.embedded .wide-field textarea { max-height: 110px; }
 body.embedded .tab-binding { padding: 10px; font-size: 12px; }
 body.embedded .binding-row { flex-wrap: wrap; gap: 6px; }
 body.embedded .binding-row select { flex-basis: 100%; }

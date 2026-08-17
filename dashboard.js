@@ -1,5 +1,6 @@
 const $ = (selector) => document.querySelector(selector);
 const imageInput = $("#images");
+const referenceInput = $("#references");
 const promptInput = $("#prompts");
 const taskBody = $("#tasks");
 const summary = $("#summary");
@@ -82,7 +83,15 @@ function managerSettings() {
     autoRefresh: $("#auto-refresh").checked,
     refreshMinutes: Math.max(1, Number($("#refresh-minutes").value) || 5),
     maxRefreshes: Math.max(1, Number($("#max-refreshes").value) || 2),
-    newChatEachTask: $("#new-chat-each-task").checked
+    newChatEachTask: $("#new-chat-each-task").checked,
+    promptPreset: $("#prompt-preset").value,
+    referenceMode: $("#reference-mode").value,
+    brandName: $("#brand-name").value.trim(),
+    specifiedCopy: $("#specified-copy").value.trim(),
+    presetCount: Math.max(1, Math.min(20, Number($("#preset-count").value) || 1)),
+    fixedPosition: $("#fixed-position").value,
+    fixedPrompt: $("#fixed-prompt").value.trim(),
+    customTemplate: $("#custom-template").value
   };
 }
 
@@ -101,6 +110,19 @@ async function restoreManagerSettings() {
   $("#refresh-minutes").value = value.refreshMinutes ?? 5;
   $("#max-refreshes").value = value.maxRefreshes ?? 2;
   $("#new-chat-each-task").checked = value.newChatEachTask === true;
+  $("#prompt-preset").value = value.promptPreset || "original";
+  $("#reference-mode").value = value.referenceMode || "auto";
+  $("#brand-name").value = value.brandName || "";
+  $("#specified-copy").value = value.specifiedCopy || "";
+  $("#preset-count").value = value.presetCount || 1;
+  $("#fixed-position").value = value.fixedPosition || "append";
+  $("#fixed-prompt").value = value.fixedPrompt || "";
+  $("#custom-template").value = value.customTemplate || "";
+  updatePresetVisibility();
+}
+
+function updatePresetVisibility() {
+  $("#custom-template-wrap").classList.toggle("hidden", $("#prompt-preset").value !== "custom");
 }
 
 function log(message) {
@@ -197,6 +219,65 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function referenceProductName(filename) {
+  return filename
+    .replace(/\.[^.]+$/, "")
+    .replace(/[-_ ]*(?:参考图|构图参考|场景参考|场景图)(?:[-_ ].*)?$/i, "")
+    .trim();
+}
+
+function matchReferenceImages(product, referenceFiles, mode) {
+  if (!referenceFiles.length) return [];
+  if (mode === "common" || (mode === "auto" && referenceFiles.length === 1)) return referenceFiles;
+  return referenceFiles.filter((file) => referenceProductName(file.name) === product);
+}
+
+const PRESET_LABELS = {
+  original: "原始 Markdown",
+  replace: "产品与品牌替换",
+  composition: "仅参考构图",
+  custom: "自定义模板"
+};
+
+function replaceTemplateVariables(template, variables) {
+  return template.replace(/\{(产品名|品牌名|指定文案|Markdown提示词|参考图数量|产品图序号|生成数量)\}/g, (_, key) => variables[key] ?? "");
+}
+
+function buildTaskPrompt(markdownPrompt, product, referenceCount, expected, settings) {
+  const productImageIndex = referenceCount + 1;
+  const variables = {
+    产品名: product,
+    品牌名: settings.brandName || "以产品图包装为准",
+    指定文案: settings.specifiedCopy || "无额外指定文案",
+    Markdown提示词: markdownPrompt,
+    参考图数量: String(referenceCount),
+    产品图序号: String(productImageIndex),
+    生成数量: String(expected)
+  };
+  let prompt = markdownPrompt;
+
+  if (settings.promptPreset === "replace") {
+    prompt = `附件中的图1至图${referenceCount}为参考图，图${productImageIndex}为唯一产品依据。\n` +
+      `保持参考图的画面比例、镜头视角、主体位置、背景结构和光影关系，将参考图中的原产品及原品牌完整替换为图${productImageIndex}中的${product}。\n` +
+      `产品包装造型、颜色、品牌Logo和标签内容必须以图${productImageIndex}为准，不得混用参考图中的品牌、文字或包装元素。\n` +
+      `品牌要求：${variables.品牌名}。指定文案：${variables.指定文案}。请生成${expected}张独立图片。\n\n${markdownPrompt}`;
+  } else if (settings.promptPreset === "composition") {
+    prompt = `附件中的图1至图${referenceCount}仅用于参考构图，图${productImageIndex}为唯一产品依据。\n` +
+      `只参考构图关系、视角、景别、留白、背景布局和光影氛围，不复制参考图中的产品、品牌、Logo、文字、人物身份或独特素材。\n` +
+      `以图${productImageIndex}中的${product}为唯一商品主体，重新设计原创电商图片。品牌要求：${variables.品牌名}。指定文案：${variables.指定文案}。请生成${expected}张独立图片。\n\n${markdownPrompt}`;
+  } else if (settings.promptPreset === "custom") {
+    prompt = replaceTemplateVariables(settings.customTemplate, variables).trim();
+  }
+
+  const fixed = settings.fixedPrompt;
+  if (fixed) {
+    if (settings.fixedPosition === "replace") prompt = fixed;
+    else if (settings.fixedPosition === "prepend") prompt = `${fixed}\n\n${prompt}`.trim();
+    else prompt = `${prompt}\n\n${fixed}`.trim();
+  }
+  return prompt.trim();
+}
+
 function extractPrompt(text) {
   const fenced = text.match(/```(?:text|txt)?\s*([\s\S]*?)```/i);
   let prompt = (fenced ? fenced[1] : text).trim();
@@ -268,6 +349,8 @@ async function rememberTask(task) {
     id: task.id,
     product: task.product,
     promptFile: task.promptFile,
+    promptPreset: task.promptPreset || "original",
+    referenceFiles: (task.referenceImages || []).map((file) => file.name),
     count: task.expected,
     startNumber: task.startNumber,
     endNumber: task.endNumber,
@@ -290,9 +373,10 @@ function render() {
       task.status?.startsWith("失败") ? "status-error" : "";
     const firstForProduct = !firstProductRows.has(task.product);
     firstProductRows.add(task.product);
-    row.innerHTML = `<td>${index + 1}</td><td></td><td></td><td>${task.expected}</td><td></td><td class="file-range"></td><td class="${statusClass}"></td>`;
+    row.innerHTML = `<td>${index + 1}</td><td></td><td></td><td></td><td>${task.expected}</td><td></td><td class="file-range"></td><td class="${statusClass}"></td>`;
     row.children[1].textContent = task.product;
     row.children[2].textContent = task.promptFile;
+    row.children[3].textContent = `${task.referenceImages?.length || 0}张 / ${PRESET_LABELS[task.promptPreset] || "原始 Markdown"}`;
     if (firstForProduct) {
       const input = document.createElement("input");
       input.className = "start-number";
@@ -306,16 +390,16 @@ function render() {
         const value = Math.max(1, Math.floor(Number(input.value) || 1));
         await setProductStartNumber(task.product, value);
       });
-      row.children[4].appendChild(input);
+      row.children[5].appendChild(input);
     } else {
       const automatic = document.createElement("span");
       automatic.className = "auto-number";
       automatic.textContent = `自动 ${paddedNumber(task.startNumber)}`;
-      row.children[4].appendChild(automatic);
+      row.children[5].appendChild(automatic);
     }
-    row.children[5].textContent =
+    row.children[6].textContent =
       `${task.product}_${paddedNumber(task.startNumber)}–${paddedNumber(task.endNumber)}`;
-    row.children[6].textContent = task.status;
+    row.children[7].textContent = task.status;
     taskBody.appendChild(row);
   });
   const pending = tasks.filter((task) => task.status !== "已完成").length;
@@ -345,9 +429,10 @@ async function setProductStartNumber(product, startNumber) {
 
 async function buildTasks() {
   const images = Array.from(imageInput.files);
+  const references = Array.from(referenceInput.files);
   const prompts = Array.from(promptInput.files);
-  if (!images.length || !prompts.length) {
-    log("请选择产品图片和 Markdown 文件。");
+  if (!images.length) {
+    log("请选择产品图片。");
     return;
   }
   if (!boundTabId) {
@@ -363,36 +448,72 @@ async function buildTasks() {
   }
 
   const imageEntries = images.map((file) => ({ product: productName(file.name), file }));
+  const promptSettings = managerSettings();
+  if (!prompts.length && promptSettings.promptPreset === "original" && !promptSettings.fixedPrompt) {
+    log("未选择 Markdown；请改用预设模式，或填写固定提示词后再生成任务。");
+    return;
+  }
+  if (["replace", "composition"].includes(promptSettings.promptPreset) && !references.length) {
+    log("当前预设需要参考图，请先选择至少一张参考图片。");
+    return;
+  }
+  if (promptSettings.promptPreset === "custom" && !promptSettings.customTemplate.trim()) {
+    log("已选择自定义模板，但模板内容为空。");
+    return;
+  }
   const done = await completedIds();
   const savedStarts = await chrome.storage.local.get("productStartNumbers");
   const productStarts = savedStarts.productStartNumbers || {};
   const nextNumber = new Map();
   tasks = [];
+  const promptSources = prompts.length
+    ? prompts.map((file) => ({ file }))
+    : imageEntries.map((entry) => ({
+        file: { name: "内置预设（无 Markdown）", text: async () => "" },
+        directMatch: { image: entry.file, matchedProduct: entry.product, mode: "exact" }
+      }));
 
-  for (const promptFile of prompts) {
-    const product = productName(promptFile.name);
-    const match = matchProductImage(product, imageEntries);
+  for (const source of promptSources) {
+    const promptFile = source.file;
+    const promptProduct = source.directMatch?.matchedProduct || productName(promptFile.name);
+    const match = source.directMatch || matchProductImage(promptProduct, imageEntries);
     if (match?.ambiguous) {
       log(`匹配冲突：${promptFile.name} 同时匹配 ${match.ambiguous.join("、")}，请调整文件名后重试。`);
       continue;
     }
     const image = match?.image;
     if (!image) {
-      log(`未匹配：${promptFile.name} 找不到同名产品图片（识别产品名：${product}）。`);
+      log(`未匹配：${promptFile.name} 找不到同名产品图片（识别产品名：${promptProduct}）。`);
       continue;
     }
     if (match.mode === "prefix") {
       log(`前缀匹配：${promptFile.name} → ${image.name}（产品名：${match.matchedProduct}）。`);
     }
+    const product = match.matchedProduct;
+    const referenceImages = matchReferenceImages(product, references, promptSettings.referenceMode);
+    if (["replace", "composition"].includes(promptSettings.promptPreset) && !referenceImages.length) {
+      log(`未匹配参考图：${promptFile.name} 对应产品 ${product} 没有可用参考图。`);
+      continue;
+    }
+    if (referenceImages.length) {
+      log(`参考图匹配：${product} → ${referenceImages.map((file) => file.name).join("、")}。`);
+    }
     const rawPromptFile = await promptFile.text();
-    const prompt = extractPrompt(rawPromptFile);
-    const baseId = await digest(`${product}|${image.name}|${image.size}|${prompt}`);
+    const markdownPrompt = extractPrompt(rawPromptFile);
+    const expected = prompts.length ? expectedCount(rawPromptFile) : promptSettings.presetCount;
+    const prompt = buildTaskPrompt(markdownPrompt, product, referenceImages.length, expected, promptSettings);
+    if (!prompt) {
+      log(`提示词为空：${promptFile.name}，已跳过。`);
+      continue;
+    }
+    const referenceSignature = referenceImages.map((file) => `${file.name}:${file.size}:${file.lastModified}`).join("|");
+    const baseId = await digest(`${product}|${image.name}|${image.size}|${referenceSignature}|${promptSettings.promptPreset}|${prompt}`);
     const startNumber = nextNumber.get(product) || Math.max(1, Number(productStarts[product]) || 1);
-    const expected = expectedCount(rawPromptFile);
     const endNumber = startNumber + expected - 1;
     const id = await makeTaskId(baseId, startNumber);
     tasks.push({
-      id, baseId, product, image, prompt,
+      id, baseId, product, image, referenceImages, prompt,
+      promptPreset: promptSettings.promptPreset,
       promptFile: promptFile.name,
       // 在清理固定结尾句前识别数量，避免删除文案影响预期图片数。
       expected,
@@ -660,16 +781,21 @@ async function run() {
               lastSignature: ""
             };
             await saveQueue();
-            const dataUrl = await fileToDataUrl(task.image);
+            const uploadFiles = [...(task.referenceImages || []), task.image];
+            const uploadImages = await Promise.all(uploadFiles.map(async (file) => ({
+              dataUrl: await fileToDataUrl(file),
+              name: file.name,
+              type: file.type
+            })));
             const sent = await messageTab(tab.id, {
               type: "GPT_AUTOMATION_SEND",
-              image: { dataUrl, name: task.image.name, type: task.image.type },
+              images: uploadImages,
               prompt: task.prompt
             });
             if (!sent?.ok) throw new Error(sent?.error || "发送失败");
             task.runtime.stage = "waiting";
             await saveQueue();
-            log("图片和提示词已发送，开始轮询。");
+            log(`${uploadImages.length} 张附件和提示词已发送，开始轮询。`);
           }
 
           images = await waitForAllImages(tab.id, baseline, task.expected, task);
@@ -730,9 +856,10 @@ $("#clear-history").addEventListener("click", async () => {
   log("全部任务历史和图片下载历史已清空。");
 });
 
-for (const input of document.querySelectorAll(".settings input")) {
+for (const input of document.querySelectorAll(".settings input, .prompt-builder input, .prompt-builder select, .prompt-builder textarea")) {
   input.addEventListener("change", saveManagerSettings);
 }
+$("#prompt-preset").addEventListener("change", updatePresetVisibility);
 
 async function initializeManager() {
   await restoreManagerSettings();
