@@ -201,7 +201,7 @@ async function runJob(jobId, images, options) {
     }
     await waitForDownload(downloadId);
     if (armedApiDownload?.downloadId === downloadId) armedApiDownload = null;
-    await rememberDownloaded(images[i].key);
+    await rememberDownloaded(images[i].historyKey || images[i].key);
   }
 
   activeJobs.set(jobId, {
@@ -245,13 +245,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "GPT_IMAGE_FILTER_HISTORY") {
     getDownloadedKeys().then((downloadedKeys) => {
       const images = message.images || [];
-      const pending = images.filter((image) => !downloadedKeys.has(image.key));
+       const pending = images.filter((image) => !downloadedKeys.has(image.historyKey || image.key));
       sendResponse({
         ok: true,
         images: pending,
         items: images.map((image) => ({
           ...image,
-          downloaded: downloadedKeys.has(image.key)
+          downloaded: downloadedKeys.has(image.historyKey || image.key)
         })),
         downloadedCount: images.length - pending.length
       });

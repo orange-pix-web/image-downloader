@@ -77,6 +77,39 @@
           <label class="wide-field">按产品设置旧文字（每行：目标产品=参考图旧文字）
             <textarea id="product-text-rules" rows="3" placeholder="禽益生=禽一片&#10;鸽虫净=鸽虫清、旧品牌名"></textarea>
           </label>
+          <div class="disclaimer-box">
+            <label class="check-setting"><input id="disclaimer-enabled" type="checkbox" />启用图片声明</label>
+            <div class="prompt-grid">
+              <label>添加方式
+                <select id="disclaimer-mode">
+                  <option value="overlay">下载时精确叠加</option>
+                  <option value="prompt">写入生图提示词</option>
+                  <option value="both">提示词生成 + 下载叠加</option>
+                </select>
+              </label>
+              <label>声明位置
+                <select id="disclaimer-position">
+                  <option value="bottom-center">底部居中</option>
+                  <option value="bottom-right">右下角</option>
+                  <option value="bottom-left">左下角</option>
+                </select>
+              </label>
+              <label>放置方式
+                <select id="disclaimer-layout">
+                  <option value="footer">扩展底部声明区（不遮挡）</option>
+                  <option value="overlay">覆盖在原图安全边缘</option>
+                </select>
+              </label>
+              <label>字号（图片宽度%）<input id="disclaimer-font-percent" type="number" min="0.6" max="4" step="0.1" value="1.2" /></label>
+              <label>文字透明度（%）<input id="disclaimer-opacity" type="number" min="30" max="100" step="5" value="65" /></label>
+              <label class="check-setting"><input id="disclaimer-background" type="checkbox" checked />使用淡色半透明底</label>
+            </div>
+            <label class="wide-field">声明文字
+              <textarea id="disclaimer-text" rows="2">以上仅代表本产品的各种可使用场景
+不代表任何功效、症状等情况</textarea>
+            </label>
+            <p class="note">下载叠加可保证文字准确；豆包原生“保存”目前会自动使用提示词声明，不进行下载后叠字。</p>
+          </div>
           <label id="custom-template-wrap" class="wide-field hidden">自定义模板
             <textarea id="custom-template" rows="7" placeholder="支持 {产品名}、{品牌名}、{指定文案}、{禁用文字}、{文字替换要求}、{Markdown提示词}、{参考图数量}、{产品图序号}、{生成数量}"></textarea>
           </label>

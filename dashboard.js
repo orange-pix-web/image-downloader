@@ -93,6 +93,14 @@ function managerSettings() {
     fixedPrompt: $("#fixed-prompt").value.trim(),
     forbiddenReferenceText: $("#forbidden-reference-text").value.trim(),
     productTextRules: $("#product-text-rules").value.trim(),
+    disclaimerEnabled: $("#disclaimer-enabled").checked,
+    disclaimerMode: $("#disclaimer-mode").value,
+    disclaimerPosition: $("#disclaimer-position").value,
+    disclaimerLayout: $("#disclaimer-layout").value,
+    disclaimerFontPercent: Math.max(0.6, Math.min(4, Number($("#disclaimer-font-percent").value) || 1.2)),
+    disclaimerOpacity: Math.max(30, Math.min(100, Number($("#disclaimer-opacity").value) || 65)),
+    disclaimerBackground: $("#disclaimer-background").checked,
+    disclaimerText: $("#disclaimer-text").value.trim(),
     customTemplate: $("#custom-template").value
   };
 }
@@ -121,6 +129,14 @@ async function restoreManagerSettings() {
   $("#fixed-prompt").value = value.fixedPrompt || "";
   $("#forbidden-reference-text").value = value.forbiddenReferenceText || "";
   $("#product-text-rules").value = value.productTextRules || "";
+  $("#disclaimer-enabled").checked = value.disclaimerEnabled === true;
+  $("#disclaimer-mode").value = value.disclaimerMode || "overlay";
+  $("#disclaimer-position").value = value.disclaimerPosition || "bottom-center";
+  $("#disclaimer-layout").value = value.disclaimerLayout || "footer";
+  $("#disclaimer-font-percent").value = value.disclaimerFontPercent || 1.2;
+  $("#disclaimer-opacity").value = value.disclaimerOpacity || 65;
+  $("#disclaimer-background").checked = value.disclaimerBackground !== false;
+  $("#disclaimer-text").value = value.disclaimerText || "以上仅代表本产品的各种可使用场景\n不代表任何功效、症状等情况";
   $("#custom-template").value = value.customTemplate || "";
   updatePresetVisibility();
 }
@@ -265,6 +281,29 @@ function textReplacementRequirement(product, forbiddenWords) {
   return `参考图禁用文字：${listed}。必须彻底删除这些旧产品名、旧品牌或旧文案，不得在生成图片的任何位置保留、变形、谐写、缩写或部分沿用。目标产品名称统一为【${product}】，产品包装、品牌Logo、标签和文字仅以最后一张产品图为准。输出前逐处检查，确保禁用文字完全不存在。`;
 }
 
+function disclaimerConfig(settings) {
+  return {
+    enabled: settings.disclaimerEnabled === true && Boolean(settings.disclaimerText),
+    mode: settings.disclaimerMode || "overlay",
+    position: settings.disclaimerPosition || "bottom-center",
+    layout: settings.disclaimerLayout || "footer",
+    fontPercent: settings.disclaimerFontPercent || 1.2,
+    opacity: settings.disclaimerOpacity || 65,
+    background: settings.disclaimerBackground !== false,
+    text: settings.disclaimerText || ""
+  };
+}
+
+function disclaimerPromptRequirement(config) {
+  if (!config.enabled) return "";
+  const position = {
+    "bottom-center": "画面底部居中",
+    "bottom-right": "画面右下角",
+    "bottom-left": "画面左下角"
+  }[config.position] || "画面底部";
+  return `请在${position}的不重要安全区域加入以下小号声明文字，字号要小、低调、不显眼，但仍可辨认；不得遮挡产品主体、品牌Logo、产品名称、卖点文案或其他重要元素。声明必须逐字准确，不得改写、遗漏或产生错别字：\n【${config.text}】`;
+}
+
 function replaceTemplateVariables(template, variables) {
   return template.replace(/\{(产品名|品牌名|指定文案|禁用文字|文字替换要求|Markdown提示词|参考图数量|产品图序号|生成数量)\}/g, (_, key) => variables[key] ?? "");
 }
@@ -307,6 +346,10 @@ function buildTaskPrompt(markdownPrompt, product, referenceCount, expected, sett
   }
   if (replacementRequirement && !prompt.includes(replacementRequirement)) {
     prompt = `${prompt}\n\n${replacementRequirement}`.trim();
+  }
+  const disclaimer = disclaimerConfig(settings);
+  if (disclaimer.enabled && ["prompt", "both"].includes(disclaimer.mode)) {
+    prompt = `${prompt}\n\n${disclaimerPromptRequirement(disclaimer)}`.trim();
   }
   return prompt.trim();
 }
@@ -385,6 +428,7 @@ async function rememberTask(task) {
     promptPreset: task.promptPreset || "original",
     referenceFiles: (task.referenceImages || []).map((file) => file.name),
     forbiddenWords: task.forbiddenWords || [],
+    disclaimer: task.disclaimer || null,
     count: task.expected,
     startNumber: task.startNumber,
     endNumber: task.endNumber,
@@ -411,7 +455,8 @@ function render() {
     row.children[1].textContent = task.product;
     row.children[2].textContent = task.promptFile;
     row.children[3].textContent = `${task.referenceImages?.length || 0}张 / ${PRESET_LABELS[task.promptPreset] || "原始 Markdown"}` +
-      (task.forbiddenWords?.length ? ` / 禁词:${task.forbiddenWords.join("、")}` : "");
+      (task.forbiddenWords?.length ? ` / 禁词:${task.forbiddenWords.join("、")}` : "") +
+      (task.disclaimer?.enabled ? " / 声明" : "");
     if (firstForProduct) {
       const input = document.createElement("input");
       input.className = "start-number";
@@ -537,18 +582,19 @@ async function buildTasks() {
     const markdownPrompt = extractPrompt(rawPromptFile);
     const expected = prompts.length ? expectedCount(rawPromptFile) : promptSettings.presetCount;
     const forbiddenWords = forbiddenTextForProduct(product, promptSettings);
+    const disclaimer = disclaimerConfig(promptSettings);
     const prompt = buildTaskPrompt(markdownPrompt, product, referenceImages.length, expected, promptSettings);
     if (!prompt) {
       log(`提示词为空：${promptFile.name}，已跳过。`);
       continue;
     }
     const referenceSignature = referenceImages.map((file) => `${file.name}:${file.size}:${file.lastModified}`).join("|");
-    const baseId = await digest(`${product}|${image.name}|${image.size}|${referenceSignature}|${promptSettings.promptPreset}|${prompt}`);
+    const baseId = await digest(`${product}|${image.name}|${image.size}|${referenceSignature}|${promptSettings.promptPreset}|${prompt}|${JSON.stringify(disclaimer)}`);
     const startNumber = nextNumber.get(product) || Math.max(1, Number(productStarts[product]) || 1);
     const endNumber = startNumber + expected - 1;
     const id = await makeTaskId(baseId, startNumber);
     tasks.push({
-      id, baseId, product, image, referenceImages, prompt, forbiddenWords,
+      id, baseId, product, image, referenceImages, prompt, forbiddenWords, disclaimer,
       promptPreset: promptSettings.promptPreset,
       promptFile: promptFile.name,
       // 在清理固定结尾句前识别数量，避免删除文案影响预期图片数。
@@ -697,10 +743,87 @@ async function waitForAllImages(tabId, baselineKeys, expected, task) {
   throw new Error(`等待超时，未确认全部 ${expected} 张图片生成完成`);
 }
 
+function wrapCanvasText(context, text, maxWidth) {
+  const lines = [];
+  for (const paragraph of String(text).split(/\r?\n/)) {
+    let line = "";
+    for (const character of paragraph) {
+      const candidate = line + character;
+      if (line && context.measureText(candidate).width > maxWidth) {
+        lines.push(line);
+        line = character;
+      } else {
+        line = candidate;
+      }
+    }
+    lines.push(line || " ");
+  }
+  return lines;
+}
+
+function canvasToBlob(canvas, type = "image/png", quality = 0.96) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("声明图片编码失败")), type, quality);
+  });
+}
+
+async function overlayDisclaimer(imageUrl, config) {
+  const response = await fetch(imageUrl, { credentials: "include" });
+  if (!response.ok) throw new Error(`读取原图失败（HTTP ${response.status}）`);
+  const sourceBlob = await response.blob();
+  const bitmap = await createImageBitmap(sourceBlob);
+  try {
+    const fontSize = Math.max(10, Math.round(bitmap.width * config.fontPercent / 100));
+    const lineHeight = Math.ceil(fontSize * 1.35);
+    const padding = Math.max(12, Math.round(bitmap.width * 0.02));
+    const scratch = document.createElement("canvas");
+    const scratchContext = scratch.getContext("2d");
+    scratchContext.font = `${fontSize}px "Microsoft YaHei", "Noto Sans CJK SC", sans-serif`;
+    const lines = wrapCanvasText(scratchContext, config.text, bitmap.width - padding * 2);
+    const blockHeight = lines.length * lineHeight;
+    const footerHeight = config.layout === "footer" ? blockHeight + padding * 2 : 0;
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height + footerHeight;
+    const context = canvas.getContext("2d");
+    context.drawImage(bitmap, 0, 0);
+
+    let top = config.layout === "footer"
+      ? bitmap.height + padding
+      : bitmap.height - padding - blockHeight;
+    if (config.layout === "footer") {
+      context.fillStyle = "#f5f5f5";
+      context.fillRect(0, bitmap.height, canvas.width, footerHeight);
+    } else if (config.background) {
+      context.fillStyle = "rgba(255,255,255,0.58)";
+      context.fillRect(padding / 2, top - padding / 2, canvas.width - padding, blockHeight + padding);
+    }
+
+    context.font = `${fontSize}px "Microsoft YaHei", "Noto Sans CJK SC", sans-serif`;
+    context.textBaseline = "top";
+    context.fillStyle = `rgba(45,45,45,${config.opacity / 100})`;
+    const align = config.position.endsWith("right") ? "right" : config.position.endsWith("left") ? "left" : "center";
+    context.textAlign = align;
+    const x = align === "right" ? canvas.width - padding : align === "left" ? padding : canvas.width / 2;
+    for (const line of lines) {
+      context.fillText(line, x, top, canvas.width - padding * 2);
+      top += lineHeight;
+    }
+    const outputBlob = await canvasToBlob(canvas, "image/png");
+    const objectUrl = URL.createObjectURL(outputBlob);
+    return { url: objectUrl, cleanup: () => URL.revokeObjectURL(objectUrl) };
+  } finally {
+    bitmap.close();
+  }
+}
+
 async function downloadTask(task, images) {
+  const disclaimer = task.disclaimer || { enabled: false };
+  const disclaimerSuffix = disclaimer.enabled ? await digest(JSON.stringify(disclaimer)) : "";
   const numberedImages = images.map((image, index) => ({
     ...image,
-    order: task.startNumber + index
+    order: task.startNumber + index,
+    historyKey: disclaimerSuffix ? `${image.key}|disclaimer:${disclaimerSuffix}` : image.key
   }));
   const filtered = await chrome.runtime.sendMessage({
     type: "GPT_IMAGE_FILTER_HISTORY",
@@ -717,7 +840,7 @@ async function downloadTask(task, images) {
       const armed = await chrome.runtime.sendMessage({
         type: "GPT_NATIVE_DOWNLOAD_ARM",
         filenameBase,
-        key: image.key
+        key: image.historyKey
       });
       if (!armed?.ok) throw new Error(armed?.error || "无法准备豆包原图保存");
       const tab = await findAiTab();
@@ -740,20 +863,29 @@ async function downloadTask(task, images) {
       });
       if (finalStatus.job?.state !== "complete") throw new Error("等待豆包原图保存超时");
     } else {
+      let prepared = null;
+      if (disclaimer.enabled && ["overlay", "both"].includes(disclaimer.mode)) {
+        log(`正在为 ${task.product}_${paddedNumber(image.order)} 精确叠加图片声明。`);
+        prepared = await overlayDisclaimer(image.url, disclaimer);
+      }
       const result = await chrome.runtime.sendMessage({
         type: "GPT_IMAGE_DOWNLOAD",
-        images: [image],
+        images: [{ ...image, url: prepared?.url || image.url }],
         options: {
           folder: image.platform === "doubao" ? "豆包图片" : "ChatGPT图片",
           prefix: task.product
         }
       });
       if (!result?.jobId) throw new Error("无法启动下载");
-      while (true) {
-        await sleep(500);
-        const status = await chrome.runtime.sendMessage({ type: "GPT_IMAGE_STATUS", jobId: result.jobId });
-        if (status.job?.state === "complete") break;
-        if (status.job?.state === "error") throw new Error(status.job.error);
+      try {
+        while (true) {
+          await sleep(500);
+          const status = await chrome.runtime.sendMessage({ type: "GPT_IMAGE_STATUS", jobId: result.jobId });
+          if (status.job?.state === "complete") break;
+          if (status.job?.state === "error") throw new Error(status.job.error);
+        }
+      } finally {
+        prepared?.cleanup();
       }
     }
   }
@@ -806,6 +938,15 @@ async function run() {
             }
             const before = await messageTab(tab.id, { type: "GPT_AUTOMATION_STATE" });
             baseline = new Set((before.images || []).map((image) => image.key));
+            let outgoingPrompt = task.prompt;
+            if (
+              before.platform === "doubao" &&
+              task.disclaimer?.enabled &&
+              task.disclaimer.mode === "overlay"
+            ) {
+              outgoingPrompt = `${outgoingPrompt}\n\n${disclaimerPromptRequirement(task.disclaimer)}`.trim();
+              log("豆包原生保存无法下载后叠字，本任务已自动改为在生图提示词中添加声明。");
+            }
             task.runtime = {
               stage: "sending",
               tabId: tab.id,
@@ -826,7 +967,7 @@ async function run() {
             const sent = await messageTab(tab.id, {
               type: "GPT_AUTOMATION_SEND",
               images: uploadImages,
-              prompt: task.prompt
+              prompt: outgoingPrompt
             });
             if (!sent?.ok) throw new Error(sent?.error || "发送失败");
             task.runtime.stage = "waiting";

@@ -19,6 +19,9 @@ header p, .note { color: #68736f; }
 .prompt-grid label, .wide-field { color: #42504b; font-size: 12px; font-weight: 700; }
 .prompt-grid input, .prompt-grid select, .wide-field textarea { width: 100%; margin-top: 6px; padding: 9px; border: 1px solid #ccd5d2; border-radius: 7px; background: white; font: inherit; }
 .wide-field textarea { resize: vertical; font-weight: 400; line-height: 1.45; }
+.disclaimer-box { display: grid; gap: 10px; padding: 12px; border: 1px solid #d8dfdc; border-radius: 9px; background: #f7faf9; }
+.disclaimer-box > .check-setting { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 700; }
+.disclaimer-box > .check-setting input { width: auto; margin: 0; }
 .hidden { display: none; }
 .settings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 .settings label { font-size: 13px; font-weight: 700; }
