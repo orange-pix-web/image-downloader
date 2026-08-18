@@ -38,6 +38,11 @@
           <strong>③ 选择提示词 Markdown（可多选）</strong>
           <input id="prompts" type="file" accept=".md,text/markdown,text/plain" multiple />
         </label>
+        <label class="picker folder-picker">
+          <strong>或者：选择完整任务文件夹</strong>
+          <input id="task-folder" type="file" webkitdirectory directory multiple />
+          <span class="note">目录格式：产品名/产品图、参考图、提示词、卖点.txt。选择文件夹后优先使用文件夹内容。</span>
+        </label>
 
         <div class="prompt-builder">
           <strong>提示词预设</strong>
@@ -60,6 +65,8 @@
             <label>品牌名（可选）<input id="brand-name" type="text" placeholder="默认以产品图包装为准" /></label>
             <label>指定文案（可选）<input id="specified-copy" type="text" placeholder="需要出现在图片中的文案" /></label>
             <label>无 Markdown 时生成数量<input id="preset-count" type="number" min="1" max="20" value="1" /></label>
+            <label>每批最多附件数<input id="max-attachments" type="number" min="2" max="20" value="10" /></label>
+            <label class="check-setting"><input id="folder-one-to-one" type="checkbox" checked />文件夹任务一张参考图对应一张输出</label>
             <label>固定提示词位置
               <select id="fixed-position">
                 <option value="append">追加到末尾</option>

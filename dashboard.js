@@ -2,6 +2,7 @@ const $ = (selector) => document.querySelector(selector);
 const imageInput = $("#images");
 const referenceInput = $("#references");
 const promptInput = $("#prompts");
+const taskFolderInput = $("#task-folder");
 const taskBody = $("#tasks");
 const summary = $("#summary");
 const logEl = $("#log");
@@ -89,6 +90,8 @@ function managerSettings() {
     brandName: $("#brand-name").value.trim(),
     specifiedCopy: $("#specified-copy").value.trim(),
     presetCount: Math.max(1, Math.min(20, Number($("#preset-count").value) || 1)),
+    maxAttachments: Math.max(2, Math.min(20, Number($("#max-attachments").value) || 10)),
+    folderOneToOne: $("#folder-one-to-one").checked,
     fixedPosition: $("#fixed-position").value,
     fixedPrompt: $("#fixed-prompt").value.trim(),
     forbiddenReferenceText: $("#forbidden-reference-text").value.trim(),
@@ -125,6 +128,8 @@ async function restoreManagerSettings() {
   $("#brand-name").value = value.brandName || "";
   $("#specified-copy").value = value.specifiedCopy || "";
   $("#preset-count").value = value.presetCount || 1;
+  $("#max-attachments").value = value.maxAttachments || 10;
+  $("#folder-one-to-one").checked = value.folderOneToOne !== false;
   $("#fixed-position").value = value.fixedPosition || "append";
   $("#fixed-prompt").value = value.fixedPrompt || "";
   $("#forbidden-reference-text").value = value.forbiddenReferenceText || "";
@@ -507,12 +512,76 @@ async function setProductStartNumber(product, startNumber) {
   log(`${product} 起始编号已设为 ${paddedNumber(startNumber)}。`);
 }
 
+function folderGroups(files) {
+  const groups = new Map();
+  const imagePattern = /\.(png|jpe?g|webp)$/i;
+  for (const file of files) {
+    const parts = String(file.webkitRelativePath || file.name).split("/").filter(Boolean);
+    const filename = parts.at(-1) || file.name;
+    const categoryIndex = parts.findIndex((part) => ["产品图", "参考图", "提示词"].includes(part));
+    let product = categoryIndex > 0 ? parts[categoryIndex - 1] : "";
+    if (!product && /^卖点\.txt$/i.test(filename) && parts.length >= 2) product = parts.at(-2);
+    if (!product) continue;
+    if (!groups.has(product)) groups.set(product, { product, images: [], references: [], prompts: [], sellingPointFile: null });
+    const group = groups.get(product);
+    const category = categoryIndex >= 0 ? parts[categoryIndex] : "";
+    if (category === "产品图" && imagePattern.test(filename)) group.images.push(file);
+    else if (category === "参考图" && imagePattern.test(filename)) group.references.push(file);
+    else if (category === "提示词" && /\.(md|txt)$/i.test(filename)) group.prompts.push(file);
+    else if (/^卖点\.txt$/i.test(filename)) group.sellingPointFile = file;
+  }
+  return Array.from(groups.values());
+}
+
+function chunkFiles(files, size) {
+  if (!files.length) return [[]];
+  const chunks = [];
+  for (let index = 0; index < files.length; index += size) chunks.push(files.slice(index, index + size));
+  return chunks;
+}
+
+function referenceStem(file) {
+  return file.name.replace(/\.[^.]+$/, "").replace(/^(?:参考图|构图参考|场景参考)[-_ ]*/i, "");
+}
+
+function sellingPointsForReferences(text, references) {
+  if (!text.trim()) return "";
+  const mapped = new Map();
+  const common = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const separator = line.search(/[=＝:：]/);
+    if (separator < 0) common.push(line);
+    else mapped.set(line.slice(0, separator).trim(), line.slice(separator + 1).trim());
+  }
+  const rows = [];
+  references.forEach((file, index) => {
+    const stem = referenceStem(file);
+    const points = mapped.get(stem) || mapped.get(String(Number(stem))) || mapped.get(String(index + 1).padStart(2, "0"));
+    if (points) rows.push(`参考图${index + 1}营销卖点：${points}`);
+  });
+  if (common.length) rows.push(`本批通用营销卖点：${common.join("；")}`);
+  return rows.join("\n");
+}
+
+function batchReferenceRequirement(references, productImageIndex, sellingPoints, oneToOne) {
+  if (!references.length) return "";
+  let requirement = `本批附件图1至图${references.length}是按顺序排列的参考图，图${productImageIndex}是唯一产品图。`;
+  if (oneToOne) {
+    requirement += ` 必须生成${references.length}张独立图片：第1张输出对应参考图1，第2张输出对应参考图2，依此类推。每张输出分别保留对应参考图的构图层级、营销卖点数量、卖点含义和排版位置；只删除旧产品名和旧品牌，不得把营销卖点一起删除。`;
+  }
+  if (sellingPoints) requirement += `\n${sellingPoints}\n以上营销卖点必须逐条体现，不得遗漏。`;
+  return requirement;
+}
+
 async function buildTasks() {
+  const folderFiles = Array.from(taskFolderInput.files);
   const images = Array.from(imageInput.files);
   const references = Array.from(referenceInput.files);
   const prompts = Array.from(promptInput.files);
-  if (!images.length) {
-    log("请选择产品图片。");
+  if (!folderFiles.length && !images.length) {
+    log("请选择产品图片，或者选择完整任务文件夹。");
     return;
   }
   if (!boundTabId) {
@@ -527,16 +596,7 @@ async function buildTasks() {
     return;
   }
 
-  const imageEntries = images.map((file) => ({ product: productName(file.name), file }));
   const promptSettings = managerSettings();
-  if (!prompts.length && promptSettings.promptPreset === "original" && !promptSettings.fixedPrompt) {
-    log("未选择 Markdown；请改用预设模式，或填写固定提示词后再生成任务。");
-    return;
-  }
-  if (["replace", "composition"].includes(promptSettings.promptPreset) && !references.length) {
-    log("当前预设需要参考图，请先选择至少一张参考图片。");
-    return;
-  }
   if (promptSettings.promptPreset === "custom" && !promptSettings.customTemplate.trim()) {
     log("已选择自定义模板，但模板内容为空。");
     return;
@@ -546,65 +606,109 @@ async function buildTasks() {
   const productStarts = savedStarts.productStartNumbers || {};
   const nextNumber = new Map();
   tasks = [];
-  const promptSources = prompts.length
-    ? prompts.map((file) => ({ file }))
-    : imageEntries.map((entry) => ({
-        file: { name: "内置预设（无 Markdown）", text: async () => "" },
-        directMatch: { image: entry.file, matchedProduct: entry.product, mode: "exact" }
-      }));
+  const maxReferencesPerBatch = promptSettings.maxAttachments - 1;
 
-  for (const source of promptSources) {
-    const promptFile = source.file;
-    const promptProduct = source.directMatch?.matchedProduct || productName(promptFile.name);
-    const match = source.directMatch || matchProductImage(promptProduct, imageEntries);
-    if (match?.ambiguous) {
-      log(`匹配冲突：${promptFile.name} 同时匹配 ${match.ambiguous.join("、")}，请调整文件名后重试。`);
-      continue;
+  async function addProductTasks({ product, image, referenceFiles, promptFiles, sellingPointsText = "", folderMode = false }) {
+    if (!image) return log(`未匹配：${product} 找不到产品图片。`);
+    if (!promptFiles.length && promptSettings.promptPreset === "original" && !promptSettings.fixedPrompt) {
+      return log(`未匹配：${product} 没有提示词；请提供 Markdown、选择预设或填写固定提示词。`);
     }
-    const image = match?.image;
-    if (!image) {
-      log(`未匹配：${promptFile.name} 找不到同名产品图片（识别产品名：${promptProduct}）。`);
-      continue;
+    if (["replace", "composition"].includes(promptSettings.promptPreset) && !referenceFiles.length) {
+      return log(`未匹配参考图：${product} 当前预设需要至少一张参考图。`);
     }
-    if (match.mode === "prefix") {
-      log(`前缀匹配：${promptFile.name} → ${image.name}（产品名：${match.matchedProduct}）。`);
+    const orderedReferences = [...referenceFiles].sort((a, b) =>
+      (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name, "zh-CN", { numeric: true })
+    );
+    const batches = chunkFiles(orderedReferences, maxReferencesPerBatch);
+    const sources = promptFiles.length
+      ? promptFiles
+      : [{ name: "内置预设（无 Markdown）", text: async () => "" }];
+    for (const promptFile of sources) {
+      const rawPromptFile = await promptFile.text();
+      const markdownPrompt = extractPrompt(rawPromptFile);
+      for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+        const referenceImages = batches[batchIndex];
+        const oneToOne = folderMode && promptSettings.folderOneToOne && referenceImages.length > 0;
+        const expected = oneToOne
+          ? referenceImages.length
+          : promptFiles.length ? expectedCount(rawPromptFile) : promptSettings.presetCount;
+        const sellingPoints = sellingPointsForReferences(sellingPointsText, referenceImages);
+        const forbiddenWords = forbiddenTextForProduct(product, promptSettings);
+        const disclaimer = disclaimerConfig(promptSettings);
+        let prompt = buildTaskPrompt(markdownPrompt, product, referenceImages.length, expected, promptSettings);
+        const batchRequirement = batchReferenceRequirement(referenceImages, referenceImages.length + 1, sellingPoints, oneToOne);
+        if (batchRequirement) prompt = `${prompt}\n\n${batchRequirement}`.trim();
+        if (!prompt) {
+          log(`提示词为空：${product} / ${promptFile.name}，已跳过。`);
+          continue;
+        }
+        const batchLabel = batches.length > 1 ? `第${batchIndex + 1}/${batches.length}批` : "";
+        const referenceSignature = referenceImages.map((file) => `${file.name}:${file.size}:${file.lastModified}`).join("|");
+        const baseId = await digest(`${product}|${image.name}|${image.size}|${referenceSignature}|${promptSettings.promptPreset}|${prompt}|${JSON.stringify(disclaimer)}`);
+        const startNumber = nextNumber.get(product) || Math.max(1, Number(productStarts[product]) || 1);
+        const endNumber = startNumber + expected - 1;
+        const id = await makeTaskId(baseId, startNumber);
+        tasks.push({
+          id, baseId, product, image, referenceImages, prompt, forbiddenWords, disclaimer,
+          promptPreset: promptSettings.promptPreset,
+          promptFile: `${promptFile.name}${batchLabel ? `（${batchLabel}）` : ""}`,
+          batchIndex: batchIndex + 1,
+          batchTotal: batches.length,
+          expected, startNumber, endNumber,
+          status: done.has(id) ? "已完成" : "待执行",
+          targetTabId: boundTabId
+        });
+        nextNumber.set(product, endNumber + 1);
+        log(`已建立：${product}${batchLabel ? ` ${batchLabel}` : ""}，参考图 ${referenceImages.length} 张，产品图 1 张，预期输出 ${expected} 张。`);
+      }
     }
-    const product = match.matchedProduct;
-    const referenceImages = matchReferenceImages(product, references, promptSettings.referenceMode);
-    if (["replace", "composition"].includes(promptSettings.promptPreset) && !referenceImages.length) {
-      log(`未匹配参考图：${promptFile.name} 对应产品 ${product} 没有可用参考图。`);
-      continue;
+  }
+
+  if (folderFiles.length) {
+    const groups = folderGroups(folderFiles);
+    if (!groups.length) {
+      log("任务文件夹中没有识别到“产品名/产品图、参考图、提示词”目录结构。");
+      return;
     }
-    if (referenceImages.length) {
-      log(`参考图匹配：${product} → ${referenceImages.map((file) => file.name).join("、")}。`);
+    for (const group of groups) {
+      if (group.images.length !== 1) {
+        log(`目录错误：${group.product}/产品图 中需要且只能有1张图片，当前 ${group.images.length} 张。`);
+        continue;
+      }
+      const sellingPointsText = group.sellingPointFile ? await group.sellingPointFile.text() : "";
+      await addProductTasks({
+        product: group.product,
+        image: group.images[0],
+        referenceFiles: group.references,
+        promptFiles: group.prompts,
+        sellingPointsText,
+        folderMode: true
+      });
     }
-    const rawPromptFile = await promptFile.text();
-    const markdownPrompt = extractPrompt(rawPromptFile);
-    const expected = prompts.length ? expectedCount(rawPromptFile) : promptSettings.presetCount;
-    const forbiddenWords = forbiddenTextForProduct(product, promptSettings);
-    const disclaimer = disclaimerConfig(promptSettings);
-    const prompt = buildTaskPrompt(markdownPrompt, product, referenceImages.length, expected, promptSettings);
-    if (!prompt) {
-      log(`提示词为空：${promptFile.name}，已跳过。`);
-      continue;
+  } else {
+    const imageEntries = images.map((file) => ({ product: productName(file.name), file }));
+    const sources = prompts.length
+      ? prompts.map((file) => ({ file }))
+      : imageEntries.map((entry) => ({ file: null, directMatch: { image: entry.file, matchedProduct: entry.product, mode: "exact" } }));
+    for (const source of sources) {
+      const promptProduct = source.directMatch?.matchedProduct || productName(source.file.name);
+      const match = source.directMatch || matchProductImage(promptProduct, imageEntries);
+      if (match?.ambiguous) {
+        log(`匹配冲突：${source.file.name} 同时匹配 ${match.ambiguous.join("、")}。`);
+        continue;
+      }
+      if (!match?.image) {
+        log(`未匹配：${source.file.name} 找不到同名产品图片（识别产品名：${promptProduct}）。`);
+        continue;
+      }
+      const product = match.matchedProduct;
+      await addProductTasks({
+        product,
+        image: match.image,
+        referenceFiles: matchReferenceImages(product, references, promptSettings.referenceMode),
+        promptFiles: source.file ? [source.file] : []
+      });
     }
-    const referenceSignature = referenceImages.map((file) => `${file.name}:${file.size}:${file.lastModified}`).join("|");
-    const baseId = await digest(`${product}|${image.name}|${image.size}|${referenceSignature}|${promptSettings.promptPreset}|${prompt}|${JSON.stringify(disclaimer)}`);
-    const startNumber = nextNumber.get(product) || Math.max(1, Number(productStarts[product]) || 1);
-    const endNumber = startNumber + expected - 1;
-    const id = await makeTaskId(baseId, startNumber);
-    tasks.push({
-      id, baseId, product, image, referenceImages, prompt, forbiddenWords, disclaimer,
-      promptPreset: promptSettings.promptPreset,
-      promptFile: promptFile.name,
-      // 在清理固定结尾句前识别数量，避免删除文案影响预期图片数。
-      expected,
-      startNumber,
-      endNumber,
-      status: done.has(id) ? "已完成" : "待执行",
-      targetTabId: boundTabId
-    });
-    nextNumber.set(product, endNumber + 1);
   }
   render();
   await saveQueue();
