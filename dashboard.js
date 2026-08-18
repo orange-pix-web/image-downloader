@@ -515,20 +515,42 @@ async function setProductStartNumber(product, startNumber) {
 function folderGroups(files) {
   const groups = new Map();
   const imagePattern = /\.(png|jpe?g|webp)$/i;
-  for (const file of files) {
-    const parts = String(file.webkitRelativePath || file.name).split("/").filter(Boolean);
-    const filename = parts.at(-1) || file.name;
-    const categoryIndex = parts.findIndex((part) => ["产品图", "参考图", "提示词"].includes(part));
-    let product = categoryIndex > 0 ? parts[categoryIndex - 1] : "";
-    if (!product && /^卖点\.txt$/i.test(filename) && parts.length >= 2) product = parts.at(-2);
-    if (!product) continue;
+  const rootImages = [];
+  const rootPrompts = [];
+  const ensureGroup = (product) => {
     if (!groups.has(product)) groups.set(product, { product, images: [], references: [], prompts: [], sellingPointFile: null });
-    const group = groups.get(product);
+    return groups.get(product);
+  };
+
+  for (const file of files) {
+    const originalParts = String(file.webkitRelativePath || file.name).split("/").filter(Boolean);
+    const parts = originalParts.length > 1 ? originalParts.slice(1) : originalParts;
+    const filename = parts.at(-1) || file.name;
+
+    // 简洁目录：根目录/禽益生.png + 根目录/禽益生/01.png。
+    if (parts.length === 1) {
+      if (imagePattern.test(filename)) rootImages.push({ product: productName(filename), file });
+      else if (/\.md$/i.test(filename)) rootPrompts.push(file);
+      continue;
+    }
+
+    const categoryIndex = parts.findIndex((part) => ["产品图", "参考图", "提示词"].includes(part));
     const category = categoryIndex >= 0 ? parts[categoryIndex] : "";
+    const product = categoryIndex > 0 ? parts[categoryIndex - 1] : parts[0];
+    const group = ensureGroup(product);
     if (category === "产品图" && imagePattern.test(filename)) group.images.push(file);
     else if (category === "参考图" && imagePattern.test(filename)) group.references.push(file);
     else if (category === "提示词" && /\.(md|txt)$/i.test(filename)) group.prompts.push(file);
+    else if (!category && imagePattern.test(filename)) group.references.push(file);
+    else if (!category && /\.md$/i.test(filename)) group.prompts.push(file);
     else if (/^卖点\.txt$/i.test(filename)) group.sellingPointFile = file;
+  }
+
+  for (const entry of rootImages) ensureGroup(entry.product).images.push(entry.file);
+  const imageEntries = rootImages.map((entry) => ({ product: entry.product, file: entry.file }));
+  for (const prompt of rootPrompts) {
+    const match = matchProductImage(productName(prompt.name), imageEntries);
+    if (match?.matchedProduct) ensureGroup(match.matchedProduct).prompts.push(prompt);
   }
   return Array.from(groups.values());
 }
