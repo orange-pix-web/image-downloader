@@ -94,6 +94,21 @@ button.secondary {
   margin-top: 8px;
 }
 
+.time-picker { margin-top: 9px; padding-top: 9px; border-top: 1px solid #d7ddda; font-size: 11px; }
+.time-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-top: 6px; }
+.time-fields input { min-width: 0; margin: 0; padding: 6px 4px; font-size: 10px; }
+button.danger-fill { background: #c9362b; color: #fff; }
+.inline-option { display: flex; align-items: center; gap: 7px; font-weight: 500; }
+.inline-option input { width: 16px; height: 16px; margin: 0; }
+.wait-settings { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.wait-settings label { margin: 2px 0 8px; font-size: 11px; }
+.wait-settings input { margin-top: 4px; padding: 6px; }
+.image-quick-actions { position: absolute; inset: auto 3px 3px auto; display: flex; gap: 3px; }
+.image-quick-actions button { width: 24px; height: 22px; margin: 0; padding: 0; border-radius: 4px; font-size: 11px; }
+.image-choice.library { aspect-ratio: auto; min-height: 92px; padding-bottom: 22px; }
+.image-choice.library img { height: 68px; }
+.image-date { position: absolute; left: 3px; bottom: 4px; max-width: 48px; color: #fff; font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 button.mini {
   width: auto;
   margin: 0;

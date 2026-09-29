@@ -20,6 +20,7 @@
         <input id="prefix" value="GPT图片" maxlength="60" />
       </label>
 
+      <button id="toggle-picker" type="button" class="secondary" hidden>显示手动选图面板</button>
       <section id="picker" class="picker" hidden>
         <div class="picker-title">
           <strong>选择要下载的图片</strong>
@@ -38,10 +39,32 @@
           <input id="range-end" type="number" min="1" placeholder="止" />
           <button id="select-range" type="button" class="mini">选择</button>
         </div>
+        <div id="time-picker" class="time-picker" hidden>
+          <strong>按时间筛选</strong>
+          <div class="time-fields">
+            <input id="time-start" type="datetime-local" aria-label="开始时间" />
+            <input id="time-end" type="datetime-local" aria-label="结束时间" />
+          </div>
+          <div class="selection-actions">
+            <button id="select-time" type="button" class="mini">选择此时间段</button>
+            <button id="download-time" type="button" class="mini">下载此时间段</button>
+            <button id="delete-time" type="button" class="mini danger-fill">删除此时间段</button>
+          </div>
+        </div>
         <div id="image-list" class="image-list"></div>
       </section>
 
       <button id="download" disabled>下载已选择的图片</button>
+      <button id="auto-download" class="secondary" hidden>自动滚动并原生下载（无预览）</button>
+      <label id="auto-delete-wrap" class="inline-option" hidden>
+        <input id="auto-delete-after-download" type="checkbox" /> 下载成功后立即从资料库删除
+      </label>
+      <div id="delete-waits" class="wait-settings" hidden>
+        <label>下载后等待（秒）<input id="download-delete-wait" type="number" min="1" max="30" step="1" value="3" /></label>
+        <label>删除后等待（秒）<input id="delete-next-wait" type="number" min="1" max="30" step="1" value="2" /></label>
+      </div>
+      <button id="delete-downloaded" class="secondary danger" hidden>自动扫描并删除所有已下载图片</button>
+      <button id="delete-selected" class="danger-fill" hidden>删除已选择的图片</button>
       <button id="open-dashboard">打开自动生图任务管理器</button>
       <button id="rescan" class="secondary">重新扫描</button>
       <button id="clear-history" class="secondary danger">清空下载记录</button>

@@ -811,10 +811,13 @@ async function waitForAllImages(tabId, baselineKeys, expected, task) {
   runtime.lastSignature ||= "";
   runtime.observedKeys ||= [];
   let stable = runtime.stable || 0;
+  let firstPoll = true;
   await saveQueue();
 
   while (!paused && Date.now() - runtime.waitStartedAt < timeoutMs) {
-    await sleep(pollMs);
+    // 首次进入和任务恢复时立即检测一次，后续才按配置间隔轮询。
+    if (!firstPoll) await sleep(pollMs);
+    firstPoll = false;
     let state;
     try {
       state = await messageTab(tabId, { type: "GPT_AUTOMATION_STATE" });
@@ -960,6 +963,7 @@ async function downloadTask(task, images) {
     log(`恢复下载时已跳过 ${numberedImages.length - pendingImages.length} 张有历史记录的图片。`);
   }
   for (const image of pendingImages) {
+    log(`准备下载：${task.product}_${paddedNumber(image.order)}（剩余 ${pendingImages.length - pendingImages.indexOf(image)} 张）。`);
     if (image.downloadMethod === "doubao-save") {
       const filenameBase =
         `豆包图片/${task.product}_${paddedNumber(image.order)}`;
@@ -989,14 +993,27 @@ async function downloadTask(task, images) {
       });
       if (finalStatus.job?.state !== "complete") throw new Error("等待豆包原图保存超时");
     } else {
+      let downloadableImage = image;
+      if (image.downloadMethod === "page-blob") {
+        const tab = await findAiTab(task.runtime?.tabId || task.targetTabId);
+        const converted = await messageTab(tab.id, {
+          type: "GPT_CHATGPT_BLOB_DATA",
+          key: image.key,
+          url: image.url
+        });
+        if (!converted?.ok || !converted.dataUrl) {
+          throw new Error(converted?.error || "无法读取 ChatGPT 页面图片");
+        }
+        downloadableImage = { ...image, url: converted.dataUrl, mime: converted.mime, downloadMethod: "url" };
+      }
       let prepared = null;
       if (disclaimer.enabled && ["overlay", "both"].includes(disclaimer.mode)) {
         log(`正在为 ${task.product}_${paddedNumber(image.order)} 精确叠加图片声明。`);
-        prepared = await overlayDisclaimer(image.url, disclaimer);
+        prepared = await overlayDisclaimer(downloadableImage.url, disclaimer);
       }
       const result = await chrome.runtime.sendMessage({
         type: "GPT_IMAGE_DOWNLOAD",
-        images: [{ ...image, url: prepared?.url || image.url }],
+        images: [{ ...downloadableImage, url: prepared?.url || downloadableImage.url }],
         options: {
           folder: image.platform === "doubao" ? "豆包图片" : "ChatGPT图片",
           prefix: task.product
@@ -1004,16 +1021,20 @@ async function downloadTask(task, images) {
       });
       if (!result?.jobId) throw new Error("无法启动下载");
       try {
+        const downloadDeadline = Date.now() + 120000;
         while (true) {
           await sleep(500);
           const status = await chrome.runtime.sendMessage({ type: "GPT_IMAGE_STATUS", jobId: result.jobId });
           if (status.job?.state === "complete") break;
           if (status.job?.state === "error") throw new Error(status.job.error);
+          if (!status.job) throw new Error("下载后台已重启，当前下载状态丢失；重新开始任务可从下载历史继续");
+          if (Date.now() >= downloadDeadline) throw new Error("等待单张图片下载完成超时（120秒）");
         }
       } finally {
         prepared?.cleanup();
       }
     }
+    log(`下载完成：${task.product}_${paddedNumber(image.order)}。`);
   }
 }
 
@@ -1040,18 +1061,31 @@ async function run() {
       try {
         const tab = await findAiTab(task.runtime?.tabId || task.targetTabId);
         let images;
-        if (task.runtime?.stage === "sending") {
-          throw new Error("任务在发送阶段被中断，已停止以避免重复发送，请检查页面后重新建立任务");
+        if (task.runtime?.stage === "sending" && Array.isArray(task.runtime?.baselineKeys)) {
+          task.runtime.stage = "waiting-recovered";
+          task.runtime.waitStartedAt ||= Date.now();
+          task.runtime.lastProgressAt ||= Date.now();
+          await saveQueue();
+          log("检测到提示词已发送但阶段标记未完成，已安全恢复为等待检测，不会重复发送提示词。");
+        } else if (task.runtime?.stage === "sending") {
+          throw new Error("发送阶段中断且缺少图片基线，无法安全判断是否已发送，请重新生成任务列表");
         }
         if (task.runtime?.stage?.startsWith("downloading") && task.runtime.readyImages?.length) {
           images = task.runtime.readyImages;
           log("已恢复下载阶段，将跳过有下载历史的图片，不会重新发送提示词。");
         } else {
           let baseline;
-          if (task.runtime?.stage?.startsWith("waiting") && task.runtime.baselineKeys?.length) {
+          if (task.runtime?.stage?.startsWith("waiting") && Array.isArray(task.runtime.baselineKeys)) {
             baseline = new Set(task.runtime.baselineKeys);
+            // 恢复任务从当前时刻重新计算等待与无进展时间，避免关闭窗口期间的时间被算作超时。
+            task.runtime.waitStartedAt = Date.now();
+            task.runtime.lastProgressAt = Date.now();
+            task.runtime.stable = 0;
+            await saveQueue();
             log("已恢复等待中的任务，继续检测图片，不会重新发送提示词。");
             await waitForPageConnection(tab.id);
+          } else if (task.runtime?.stage?.startsWith("waiting")) {
+            throw new Error("等待阶段缺少图片基线，已阻止重复发送；请重新生成任务列表");
           } else {
             if (managerSettings().newChatEachTask) {
               task.runtime = {
@@ -1165,6 +1199,7 @@ for (const input of document.querySelectorAll(".settings input, .prompt-builder 
 $("#prompt-preset").addEventListener("change", updatePresetVisibility);
 
 async function initializeManager() {
+  log(`任务管理器版本 ${chrome.runtime.getManifest().version} 已加载。`);
   await restoreManagerSettings();
   const savedBinding = await chrome.storage.local.get("managerTargetTabId");
   boundTabId = Number(savedBinding.managerTargetTabId) || null;
@@ -1176,12 +1211,18 @@ async function initializeManager() {
     const resumable = tasks.find(
       (task) =>
         task.status === "执行中" &&
-        (task.runtime?.stage?.startsWith("waiting") ||
-          task.runtime?.stage?.startsWith("downloading"))
+        ((task.runtime?.stage?.startsWith("waiting") && Array.isArray(task.runtime?.baselineKeys)) ||
+          task.runtime?.stage?.startsWith("downloading") ||
+          (task.runtime?.stage === "sending" && Array.isArray(task.runtime?.baselineKeys)))
     );
     if (resumable) {
-      log("检测到刷新前未完成的任务，即将自动恢复。");
+      log(`检测到刷新前未完成的任务（阶段：${resumable.runtime.stage}），即将自动恢复。`);
       setTimeout(run, 500);
+    } else {
+      const interrupted = tasks.find((task) => task.status === "执行中");
+      if (interrupted) {
+        log(`任务显示执行中，但保存阶段为 ${interrupted.runtime?.stage || "未知"}，请点击“开始执行”继续。`);
+      }
     }
   }
 }

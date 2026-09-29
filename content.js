@@ -1,24 +1,91 @@
 function canonicalImageKey(rawUrl) {
   try {
     const url = new URL(rawUrl, location.href);
-    return url.searchParams.get("id") || url.href;
+    if (url.protocol === "blob:") return url.href;
+    const identityParameters = ["id", "file_id", "fileId", "asset_id", "assetId", "key"];
+    for (const name of identityParameters) {
+      const value = url.searchParams.get(name);
+      if (value) return `${name}:${decodeURIComponent(value)}`;
+    }
+    const embeddedUrl = url.searchParams.get("url");
+    if (embeddedUrl) return `url:${canonicalImageKey(decodeURIComponent(embeddedUrl))}`;
+    const fileId = decodeURIComponent(url.pathname).match(/(?:file|asset)[-_][a-z0-9_-]+/i)?.[0];
+    if (fileId) return fileId;
+
+    // 保留区分不同图片的未知参数，只删除签名、有效期和显示尺寸等易变参数。
+    // 新版轮播可能让所有图片共用同一路径，仅通过查询参数区分，不能只按 pathname 去重。
+    const volatileParameters = new Set([
+      "sig", "signature", "token", "auth", "expires", "expiry", "exp",
+      "x-oss-signature", "x-oss-expires", "x-amz-signature", "x-amz-expires",
+      "w", "width", "h", "height", "q", "quality", "format", "fit", "crop"
+    ]);
+    for (const name of Array.from(url.searchParams.keys())) {
+      if (volatileParameters.has(name.toLowerCase()) || name.toLowerCase().startsWith("x-amz-")) {
+        url.searchParams.delete(name);
+      }
+    }
+    url.hash = "";
+    return url.href;
   } catch {
     return rawUrl;
   }
 }
 
 function getChatGptGeneratedImages() {
+  const images = [];
+  const seen = new Set();
+
+  // 新版 ChatGPT 画廊：以消息 ID + “显示生成的图像 N”作为稳定身份。
+  // blob URL 及主图节点会随选中状态变化，不适合作为画廊数量和顺序的唯一依据。
+  const galleries = Array.from(document.querySelectorAll('[data-testid="generated-image-gallery"]'));
+  for (let galleryIndex = 0; galleryIndex < galleries.length; galleryIndex += 1) {
+    const gallery = galleries[galleryIndex];
+    const messageIds = gallery.closest('[data-chatgpt-search-message-ids]')
+      ?.getAttribute('data-chatgpt-search-message-ids')
+      ?.trim()
+      ?.split(/\s+/);
+    const messageId = messageIds?.[0] || `gallery-${galleryIndex}`;
+    const thumbnailButtons = Array.from(
+      gallery.querySelectorAll(
+        'button[aria-label^="显示生成的图像"], button[aria-label^="Show generated image"]'
+      )
+    );
+
+    for (let buttonIndex = 0; buttonIndex < thumbnailButtons.length; buttonIndex += 1) {
+      const button = thumbnailButtons[buttonIndex];
+      const img = button.querySelector('img');
+      const url = img?.currentSrc || img?.src;
+      if (!url) continue;
+      const label = button.getAttribute('aria-label') || "";
+      const number = Number(label.match(/(\d+)\s*$/)?.[1]) || buttonIndex + 1;
+      const key = `gallery:${messageId}:${number}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      images.push({
+        url,
+        key,
+        order: images.length + 1,
+        platform: "chatgpt",
+        downloadMethod: url.startsWith("blob:") ? "page-blob" : "url"
+      });
+    }
+  }
+
   const candidates = Array.from(
     document.querySelectorAll(
       '[id^="image-"] img[src*="/backend-api/estuary/content"],' +
-      '.group\\/imagegen-image img[src*="/backend-api/estuary/content"]'
+      '.group\\/imagegen-image img,' +
+      '[data-testid="generated-image-gallery"] img,' +
+      '[data-testid="image-generation-result"] img,' +
+      '[data-message-author-role="assistant"] img,' +
+      '[data-turn="assistant"] img,' +
+      'img[alt*="Generated"], img[alt*="generated"], img[alt*="生成"]'
     )
   );
 
-  const seen = new Set();
-  const images = [];
-
   for (const img of candidates) {
+    // 新版画廊已由其带编号的缩略图按钮精确收集，跳过主图及重复缩略图。
+    if (img.closest('[data-testid="generated-image-gallery"]')) continue;
     const url = img.currentSrc || img.src;
     if (!url) continue;
 
@@ -29,10 +96,30 @@ function getChatGptGeneratedImages() {
       turn?.getAttribute("data-turn") === "user";
     if (isUserTurn) continue;
 
+    // 排除头像和小图标，但保留轮播导航缩略图；未选中的生成结果可能只以约 60px 缩略图存在。
+    const renderedWidth = img.getBoundingClientRect().width;
+    const renderedHeight = img.getBoundingClientRect().height;
+    const sourceWidth = img.naturalWidth || 0;
+    const sourceHeight = img.naturalHeight || 0;
+    const isGeneratedContainer = Boolean(
+      img.closest('[id^="image-"], .group\\/imagegen-image, [data-testid="image-generation-result"]')
+    );
+    if (
+      !isGeneratedContainer &&
+      Math.max(renderedWidth, renderedHeight) < 48 &&
+      Math.max(sourceWidth, sourceHeight) < 128
+    ) continue;
+
     const key = canonicalImageKey(url);
     if (seen.has(key)) continue;
     seen.add(key);
-    images.push({ url, key, order: images.length + 1, platform: "chatgpt", downloadMethod: "url" });
+    images.push({
+      url,
+      key,
+      order: images.length + 1,
+      platform: "chatgpt",
+      downloadMethod: url.startsWith("blob:") ? "page-blob" : "url"
+    });
   }
 
   return images;
@@ -81,6 +168,408 @@ function getGeneratedImages() {
   return location.hostname === "www.doubao.com"
     ? getDoubaoGeneratedImages()
     : getChatGptGeneratedImages();
+}
+
+function libraryRows() {
+  const primary = Array.from(document.querySelectorAll('[data-page-table-row-item="true"]'));
+  if (primary.length) return primary;
+  return Array.from(document.querySelectorAll('[data-page-table-selectable-row="true"], [role="row"]'))
+    .filter((row) => row.querySelector('img') && /\.(png|jpe?g|webp|gif)\b/i.test(row.textContent || ''));
+}
+
+function libraryFilename(row) {
+  const labelled = Array.from(row.querySelectorAll('button[aria-label], [aria-label]'))
+    .map((node) => node.getAttribute('aria-label') || '')
+    .find((label) => /\.(png|jpe?g|webp|gif)$/i.test(label.trim()));
+  if (labelled) return labelled.trim();
+  const extension = row.querySelector('[data-file-name-extension="true"]');
+  if (extension) {
+    const button = extension.closest('button');
+    const combined = (button?.textContent || '').replace(/\s+/g, '').trim();
+    if (/\.(png|jpe?g|webp|gif)$/i.test(combined)) return combined;
+  }
+  const textMatch = (row.textContent || '').match(/([^\n]+?\.(?:png|jpe?g|webp|gif))\b/i);
+  return textMatch?.[1]?.trim() || '';
+}
+
+function libraryFileId(row) {
+  return row.querySelector('[data-page-table-selection-id]')?.getAttribute('data-page-table-selection-id') ||
+    row.getAttribute('data-page-table-selection-id') ||
+    row.querySelector('[data-testid^="file-row-actions-"]')?.getAttribute('data-testid')?.replace('file-row-actions-', '') ||
+    row.querySelector('[data-testid^="artifact-checkbox-bridge-"]')?.getAttribute('data-testid')?.replace('artifact-checkbox-bridge-', '') ||
+    `filename:${libraryFilename(row)}`;
+}
+
+function libraryTimestamp(filename, modifiedText) {
+  const match = filename.match(/(?:19|20)(\d{2})(\d{2})(\d{2})[-_](\d{2})(\d{2})(\d{2})/);
+  if (match) {
+    const [, yy, month, day, hour, minute, second] = match;
+    return new Date(Number(`20${yy}`), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second)).getTime();
+  }
+  const shortMatch = filename.match(/(?:^|[^\d])(\d{2})(\d{2})[-_](\d{2})(\d{2})(\d{2})(?:[^\d]|$)/);
+  if (shortMatch) {
+    const [, month, day, hour, minute, second] = shortMatch;
+    return new Date(new Date().getFullYear(), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second)).getTime();
+  }
+  const time = modifiedText.match(/^(\d{1,2}):(\d{2})$/);
+  if (time) {
+    const date = new Date();
+    date.setHours(Number(time[1]), Number(time[2]), 0, 0);
+    return date.getTime();
+  }
+  return null;
+}
+
+function getLibraryImages() {
+  const rows = libraryRows();
+  return rows.map((row, index) => {
+    const thumbnail = row.querySelector('img');
+    const id = libraryFileId(row);
+    const filename = libraryFilename(row);
+    if (!filename || !thumbnail || !id) return null;
+    const cells = Array.from(row.querySelectorAll('[role="gridcell"]'));
+    const modifiedText = cells.find((cell) =>
+      cell.classList.contains('text-token-text-secondary') &&
+      !cell.hasAttribute('data-page-table-row-actions')
+    )?.textContent?.trim() || '';
+    return {
+      key: `library:${id}`,
+      libraryId: id,
+      filename,
+      url: thumbnail.currentSrc || thumbnail.src || '',
+      modifiedText,
+      modifiedAt: libraryTimestamp(filename, modifiedText),
+      order: index + 1,
+      platform: 'chatgpt-library',
+      downloadMethod: 'library-menu'
+    };
+  }).filter(Boolean);
+}
+
+function libraryScrollContainer() {
+  const row = libraryRows()[0];
+  let node = row?.parentElement;
+  while (node && node !== document.body) {
+    const style = getComputedStyle(node);
+    if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 40) return node;
+    node = node.parentElement;
+  }
+  return document.scrollingElement || document.documentElement;
+}
+
+async function scanAllLibraryImages() {
+  const scroller = libraryScrollContainer();
+  const originalTop = scroller.scrollTop;
+  const collected = new Map();
+  let stableRounds = 0;
+  let previousSize = 0;
+  scroller.scrollTop = 0;
+  showLibraryFloatingStatus({ state: 'running', action: 'scan', current: 0, total: 0, filename: '正在扫描资料库列表…' });
+  await sleep(400);
+  for (let round = 0; round < 300 && stableRounds < 4; round += 1) {
+    // 仅读取列表元数据；不点击文件名或图片，不触发任何预览窗口。
+    for (const item of getLibraryImages()) collected.set(item.key, {
+      key: item.key,
+      libraryId: item.libraryId,
+      filename: item.filename,
+      modifiedText: item.modifiedText,
+      modifiedAt: item.modifiedAt,
+      order: item.order,
+      platform: item.platform,
+      downloadMethod: 'library-menu'
+    });
+    showLibraryFloatingStatus({ state: 'running', action: 'scan', current: collected.size, total: 0, filename: `已发现 ${collected.size} 个文件` });
+    const before = scroller.scrollTop;
+    scroller.scrollTop = Math.min(scroller.scrollHeight, before + Math.max(420, scroller.clientHeight * 0.8));
+    scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+    await sleep(350);
+    const atEnd = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 8;
+    stableRounds = atEnd && collected.size === previousSize ? stableRounds + 1 : 0;
+    previousSize = collected.size;
+  }
+  scroller.scrollTop = originalTop;
+  scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+  await sleep(250);
+  return Array.from(collected.values()).map((item, index) => ({ ...item, order: index + 1 }));
+}
+
+function currentLibraryMetadata() {
+  return getLibraryImages().map((item) => ({
+    key: item.key, libraryId: item.libraryId, filename: item.filename,
+    modifiedText: item.modifiedText, modifiedAt: item.modifiedAt,
+    platform: item.platform, downloadMethod: 'library-menu'
+  }));
+}
+
+async function scrollLibraryNextPage() {
+  const scroller = libraryScrollContainer();
+  const before = scroller.scrollTop;
+  const beforeHeight = scroller.scrollHeight;
+  scroller.scrollTop = Math.min(scroller.scrollHeight, before + Math.max(420, scroller.clientHeight * 0.82));
+  scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+  await sleep(450);
+  return {
+    moved: scroller.scrollTop > before || scroller.scrollHeight > beforeHeight,
+    atEnd: scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 8
+  };
+}
+
+async function findLibraryRow(libraryId) {
+  const direct = () => libraryRows()
+    .find((candidate) => libraryFileId(candidate) === libraryId);
+  let row = direct();
+  if (row) return row;
+  const scroller = libraryScrollContainer();
+  scroller.scrollTop = 0;
+  for (let round = 0; round < 300; round += 1) {
+    await sleep(180);
+    row = direct();
+    if (row) return row;
+    const before = scroller.scrollTop;
+    scroller.scrollTop = Math.min(scroller.scrollHeight, before + Math.max(380, scroller.clientHeight * 0.75));
+    scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+    if (scroller.scrollTop === before) break;
+  }
+  return null;
+}
+
+function visibleMenuItem(text) {
+  const candidates = document.querySelectorAll(
+    '[role="menuitem"], [role="menu"] button, [data-radix-menu-content] [data-radix-collection-item], [data-state="open"][role="menu"] [tabindex]'
+  );
+  return Array.from(candidates).find((item) => {
+    const label = (item.getAttribute('aria-label') || item.textContent || '').replace(/\s+/g, ' ').trim();
+    return item.getClientRects().length > 0 && (label === text || label.startsWith(`${text} `));
+  });
+}
+
+function triggerNativeClick(button) {
+  const options = { bubbles: true, cancelable: true, view: window, button: 0, buttons: 1 };
+  button.dispatchEvent(new PointerEvent('pointerdown', { ...options, pointerType: 'mouse', isPrimary: true }));
+  button.dispatchEvent(new MouseEvent('mousedown', options));
+  button.dispatchEvent(new PointerEvent('pointerup', { ...options, pointerType: 'mouse', isPrimary: true, buttons: 0 }));
+  button.dispatchEvent(new MouseEvent('mouseup', { ...options, buttons: 0 }));
+  button.dispatchEvent(new MouseEvent('click', { ...options, buttons: 0 }));
+}
+
+async function openLibraryMenu(libraryId) {
+  const row = await findLibraryRow(libraryId);
+  const iconButton = row?.querySelector('svg use[href$="#623957"]')?.closest('button');
+  const button = row?.querySelector(
+    '[data-page-table-row-actions="true"] button, [data-testid^="file-row-actions-"] button, button[aria-haspopup="menu"], button[aria-label*="操作菜单"]'
+  ) || iconButton;
+  if (!button) throw new Error('资料库列表已变化，请重新扫描');
+  row.scrollIntoView({ block: 'center', inline: 'nearest' });
+  await sleep(180);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+    await sleep(100);
+    button.focus({ preventScroll: true });
+    triggerNativeClick(button);
+    const deadline = Date.now() + 2500;
+    while (Date.now() < deadline) {
+      if (visibleMenuItem('下载') || visibleMenuItem('删除')) return;
+      await sleep(100);
+    }
+  }
+  throw new Error('无法打开图片操作菜单；请确认资料库页面位于前台且未被其他弹窗遮挡');
+}
+
+const libraryPageSelection = new Set();
+const libraryItemCache = new Map();
+let libraryDecorateTimer = null;
+
+function visibleLibraryItems() {
+  return getLibraryImages().filter((item) => {
+    const row = libraryRows()
+      .find((candidate) => libraryFileId(candidate) === item.libraryId);
+    const rect = row?.getBoundingClientRect();
+    return rect && rect.bottom > 0 && rect.top < window.innerHeight;
+  });
+}
+
+function nativeRowSelectionButton(row) {
+  return row.querySelector('[data-testid^="artifact-checkbox-bridge-"]') ||
+    row.querySelector('input[type="checkbox"]') ||
+    row.querySelector('[data-page-table-selectable-row="true"]');
+}
+
+async function setNativeRowSelected(row, selected) {
+  const selectable = row.querySelector('[data-page-table-selectable-row="true"]') || row.querySelector('[role="row"]');
+  const isSelected = selectable?.getAttribute('aria-selected') === 'true';
+  if (isSelected === selected) return true;
+  const control = nativeRowSelectionButton(row);
+  if (!control) return false;
+  triggerNativeClick(control);
+  const id = libraryFileId(row);
+  const deadline = Date.now() + 1800;
+  while (Date.now() < deadline) {
+    await sleep(80);
+    const currentRow = libraryRows()
+      .find((candidate) => libraryFileId(candidate) === id);
+    const currentSelectable = currentRow?.querySelector('[data-page-table-selectable-row="true"]') || currentRow?.querySelector('[role="row"]');
+    if ((currentSelectable?.getAttribute('aria-selected') === 'true') === selected) return true;
+  }
+  return false;
+}
+
+async function decorateLibraryPage() {
+  const images = getLibraryImages();
+  if (!images.length) return;
+  for (const item of images) libraryItemCache.set(item.key, item);
+  const history = await chrome.runtime.sendMessage({ type: 'GPT_IMAGE_FILTER_HISTORY', images });
+  const downloaded = new Set((history?.items || []).filter((item) => item.downloaded).map((item) => item.key));
+  for (const item of images) {
+    const row = libraryRows()
+      .find((candidate) => libraryFileId(candidate) === item.libraryId);
+    if (!row) continue;
+    row.dataset.gptLibraryKey = item.key;
+    row.querySelector('.gpt-library-checkbox')?.remove();
+    let badge = row.querySelector('.gpt-downloaded-badge');
+    if (downloaded.has(item.key) && !badge) {
+      badge = document.createElement('span');
+      badge.className = 'gpt-downloaded-badge';
+      badge.textContent = '已下载';
+      Object.assign(badge.style, { marginLeft: '6px', padding: '2px 6px', borderRadius: '10px', background: '#d9f5eb', color: '#08745b', fontSize: '11px', whiteSpace: 'nowrap' });
+      row.querySelector('button[aria-label]')?.parentElement?.appendChild(badge);
+    }
+  }
+  let toolbar = document.querySelector('#gpt-library-toolbar');
+  if (!toolbar) {
+    toolbar = document.createElement('div');
+    toolbar.id = 'gpt-library-toolbar';
+    Object.assign(toolbar.style, { position: 'fixed', left: '50%', bottom: '22px', transform: 'translateX(-50%)', zIndex: '2147483646', display: 'flex', gap: '8px', alignItems: 'center', padding: '9px 12px', borderRadius: '12px', background: '#16211e', color: 'white', boxShadow: '0 6px 24px rgba(0,0,0,.28)', font: '13px Microsoft YaHei,sans-serif' });
+    toolbar.innerHTML = '<span data-count>调用原生选择</span><button data-select-downloaded>选择当前屏幕已下载</button><button data-clear>取消当前选择</button>';
+    for (const button of toolbar.querySelectorAll('button')) Object.assign(button.style, { border: '0', borderRadius: '7px', padding: '7px 9px', cursor: 'pointer' });
+    toolbar.querySelector('[data-select-downloaded]').addEventListener('click', async () => {
+      const visible = visibleLibraryItems();
+      const result = await chrome.runtime.sendMessage({ type: 'GPT_IMAGE_FILTER_HISTORY', images: visible });
+      const downloaded = new Set((result?.items || []).filter((item) => item.downloaded).map((item) => item.key));
+      let selectedCount = 0;
+      for (const item of visible) {
+        if (!downloaded.has(item.key)) continue;
+        const row = libraryRows()
+          .find((candidate) => libraryFileId(candidate) === item.libraryId);
+        if (row && await setNativeRowSelected(row, true)) selectedCount += 1;
+      }
+      toolbar.querySelector('[data-count]').textContent = `原生选中 ${selectedCount} 张`;
+    });
+    toolbar.querySelector('[data-clear]').addEventListener('click', async () => {
+      const ids = libraryRows()
+        .filter((row) => {
+          const rect = row.getBoundingClientRect();
+          return rect.bottom > 0 && rect.top < window.innerHeight;
+        }).map(libraryFileId).filter(Boolean);
+      for (const id of ids) {
+        const row = libraryRows()
+          .find((candidate) => libraryFileId(candidate) === id);
+        if (row) await setNativeRowSelected(row, false);
+      }
+      toolbar.querySelector('[data-count]').textContent = '调用原生选择';
+    });
+    document.body.appendChild(toolbar);
+  }
+  updateLibraryToolbar();
+}
+
+function updateLibraryToolbar() {
+  const toolbar = document.querySelector('#gpt-library-toolbar');
+  if (toolbar && !toolbar.querySelector('[data-count]').textContent.startsWith('原生选中')) {
+    toolbar.querySelector('[data-count]').textContent = '调用原生选择';
+  }
+}
+
+function showLibraryFloatingStatus(status) {
+  let panel = document.querySelector('#gpt-library-job-panel');
+  if (!panel) {
+    panel = document.createElement('aside');
+    panel.id = 'gpt-library-job-panel';
+    Object.assign(panel.style, {
+      position: 'fixed', right: '18px', top: '86px', zIndex: '2147483647', width: '286px',
+      padding: '14px', borderRadius: '13px', background: '#fff', color: '#17201d',
+      border: '1px solid rgba(0,0,0,.14)', boxShadow: '0 10px 35px rgba(0,0,0,.24)',
+      font: '13px Microsoft YaHei,system-ui,sans-serif'
+    });
+    panel.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center"><strong>资料库自动处理</strong><button data-close title="关闭" style="border:0;background:transparent;font-size:20px;cursor:pointer">×</button></div><div data-state style="margin-top:9px"></div><div style="height:7px;background:#e6ece9;border-radius:5px;margin-top:10px;overflow:hidden"><i data-progress style="display:block;height:100%;width:0;background:#0c9974;transition:width .2s"></i></div><div data-file style="margin-top:8px;color:#65716c;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>';
+    panel.querySelector('[data-close]').addEventListener('click', () => panel.remove());
+    document.body.appendChild(panel);
+  }
+  const verbs = { scan: '扫描', delete: '删除', download: '下载', 'download-delete': '下载并删除' };
+  const verb = verbs[status.action] || '处理';
+  const state = panel.querySelector('[data-state]');
+  const progress = panel.querySelector('[data-progress]');
+  const file = panel.querySelector('[data-file]');
+  if (status.state === 'running') {
+    state.textContent = status.total
+      ? `正在${verb} ${status.current || 0} / ${status.total}`
+      : status.action === 'scan'
+        ? `正在扫描，已发现 ${status.current || 0} 个文件`
+        : `正在持续${verb}，已处理 ${status.current || 0} 张`;
+    progress.style.width = `${status.total ? Math.round((status.current || 0) / status.total * 100) : 0}%`;
+    file.textContent = status.filename || '正在准备任务…';
+  } else if (status.state === 'complete') {
+    state.textContent = `完成：已${verb} ${status.total || 0} 张图片`;
+    progress.style.width = '100%';
+    file.textContent = '任务已完成，可关闭此面板。';
+  } else {
+    state.textContent = `${verb}失败`;
+    progress.style.background = '#c9362b';
+    file.textContent = status.error || '未知错误';
+  }
+}
+
+const libraryObserver = new MutationObserver(() => {
+  clearTimeout(libraryDecorateTimer);
+  libraryDecorateTimer = setTimeout(decorateLibraryPage, 250);
+});
+libraryObserver.observe(document.documentElement, { childList: true, subtree: true });
+setTimeout(decorateLibraryPage, 500);
+
+async function actOnLibraryImage(libraryId, action) {
+  // 资料库下载始终走行尾“…”菜单的原生下载，不打开文件/图片预览。
+  await openLibraryMenu(libraryId);
+  const label = action === 'delete' ? '删除' : '下载';
+  const item = visibleMenuItem(label);
+  if (!item) throw new Error(`操作菜单中找不到“${label}”`);
+  item.click();
+  if (action !== 'delete') return;
+  const dialogDeadline = Date.now() + 12000;
+  let dialog = null;
+  while (Date.now() < dialogDeadline) {
+    dialog = Array.from(document.querySelectorAll('[role="alertdialog"], [role="dialog"]'))
+      .find((node) => node.getClientRects().length > 0 && /删除文件/.test(node.textContent || ''));
+    if (dialog) break;
+    await sleep(100);
+  }
+  if (!dialog) throw new Error('未找到删除确认窗口');
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const buttons = Array.from(dialog.querySelectorAll('button'));
+    const enabled = buttons.filter((button) => !button.disabled && button.getClientRects().length > 0);
+    const confirmButton = enabled.reverse().find((button) => {
+      const label = (button.getAttribute('aria-label') || button.textContent || '').replace(/\s+/g, '').trim();
+      return /删除|移至最近删除|确认/.test(label) && !/取消|关闭/.test(label);
+    }) || enabled.find((button) => {
+      const label = (button.getAttribute('aria-label') || button.textContent || '').replace(/\s+/g, '').trim();
+      return label && !/取消|关闭/.test(label);
+    });
+    if (!confirmButton) throw new Error('删除确认按钮不可用');
+    confirmButton.scrollIntoView({ block: 'center', inline: 'center' });
+    confirmButton.focus({ preventScroll: true });
+    triggerNativeClick(confirmButton);
+    const closeDeadline = Date.now() + 8000;
+    while (Date.now() < closeDeadline) {
+      const dialogClosed = !document.contains(dialog) || dialog.getClientRects().length === 0;
+      const rowGone = !libraryRows()
+        .some((candidate) => libraryFileId(candidate) === libraryId);
+      if (dialogClosed || rowGone) {
+        await sleep(300);
+        return;
+      }
+      await sleep(120);
+    }
+  }
+  throw new Error('已点击删除确认，但网页未完成删除；任务已停止以避免状态误判');
 }
 
 function mountAutomationPanel() {
@@ -171,11 +660,152 @@ async function dataUrlToFile(dataUrl, filename, mimeType) {
   return new File([blob], filename, { type: mimeType || blob.type || "image/png" });
 }
 
+async function pageBlobToDataUrl(url) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`读取页面图片失败：HTTP ${response.status}`);
+  const blob = await response.blob();
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve({ dataUrl: reader.result, mime: blob.type || "image/png" });
+    reader.onerror = () => reject(reader.error || new Error("转换页面图片失败"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function chatGptPromptEditor() {
+  return (
+    document.querySelector('#prompt-textarea[contenteditable="true"]') ||
+    document.querySelector('#prompt-textarea textarea') ||
+    document.querySelector('form [contenteditable="true"].ProseMirror') ||
+    document.querySelector('main [contenteditable="true"][role="textbox"]') ||
+    document.querySelector('textarea[name="prompt-textarea"]') ||
+    document.querySelector('textarea[placeholder*="消息"]') ||
+    document.querySelector('textarea[placeholder*="Message"]')
+  );
+}
+
+function chatGptUploadInput() {
+  const uploads = Array.from(document.querySelectorAll('input[type="file"]'));
+  return (
+    document.querySelector('#upload-files') ||
+    uploads.find((input) => /image|png|jpe?g|webp/i.test(input.accept || "")) ||
+    uploads[0] ||
+    null
+  );
+}
+
+async function waitForChatGptComposer() {
+  let upload = chatGptUploadInput();
+  let editor = chatGptPromptEditor();
+
+  // 部分 ChatGPT 页面只有展开附件菜单后才会把隐藏的 file input 挂到 DOM。
+  if (!upload) {
+    const attachButton = Array.from(document.querySelectorAll('button')).find((button) => {
+      const label = `${button.getAttribute('aria-label') || ""} ${button.title || ""} ${button.getAttribute('data-testid') || ""}`;
+      return /attach|attachment|upload|add files|添加附件|添加文件|上传文件|composer-plus|plus-btn/i.test(label);
+    });
+    attachButton?.click();
+  }
+
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline && (!upload || !editor)) {
+    await sleep(200);
+    upload ||= chatGptUploadInput();
+    editor ||= chatGptPromptEditor();
+  }
+  return { upload, editor };
+}
+
+function chatGptSubmitButton(editor) {
+  const composer = editor?.closest('form') || editor?.closest('[data-type="unified-composer"]') || document;
+  const selectors = [
+    '#composer-submit-button',
+    'button[data-testid="send-button"]',
+    'button[data-testid="composer-submit-button"]',
+    'button[aria-label*="发送"]',
+    'button[aria-label*="Send"]',
+    'button[aria-label*="提交"]'
+  ];
+  for (const selector of selectors) {
+    const button = composer.querySelector(selector) || document.querySelector(selector);
+    if (button) return button;
+  }
+  return null;
+}
+
+function chatGptSubmitReady(button) {
+  if (!button) return false;
+  const testId = button.getAttribute("data-testid") || "";
+  const label = button.getAttribute("aria-label") || "";
+  return (
+    !button.disabled &&
+    button.getAttribute("aria-disabled") !== "true" &&
+    testId !== "stop-button" &&
+    !/停止|stop/i.test(label)
+  );
+}
+
+function chatGptGenerating() {
+  const stop = document.querySelector(
+    'button[data-testid="stop-button"], #composer-submit-button[data-testid="stop-button"], ' +
+    'button[aria-label*="停止"], button[aria-label*="Stop"]'
+  );
+  return Boolean(
+    stop ||
+    document.querySelector('[data-message-author-role="assistant"] [data-streaming="true"]') ||
+    document.querySelector('[data-message-author-role="assistant"][data-streaming="true"]')
+  );
+}
+
+function chatGptEditorText(editor) {
+  return editor instanceof HTMLTextAreaElement
+    ? editor.value
+    : editor.innerText || editor.textContent || "";
+}
+
+function normalizedPromptText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+async function fillChatGptPrompt(editor, prompt) {
+  const expected = normalizedPromptText(prompt);
+  if (!expected) throw new Error("提示词内容为空，已阻止发送附件");
+
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    editor.focus();
+    if (editor instanceof HTMLTextAreaElement) {
+      setTextareaValue(editor, prompt);
+    } else {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(editor);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.execCommand("insertText", false, prompt);
+      editor.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: prompt
+      }));
+    }
+
+    await sleep(250);
+    const actual = normalizedPromptText(chatGptEditorText(editor));
+    if (actual === expected || actual.includes(expected)) return;
+    await sleep(250);
+  }
+  throw new Error("提示词未能写入输入框，已阻止只发送图片；请刷新 ChatGPT 页面后重试");
+}
+
 async function uploadAndSend(images, prompt) {
   if (!images.length) throw new Error("没有收到待上传图片");
-  const upload = document.querySelector('#upload-files, input[type="file"][multiple]');
-  const editor = document.querySelector('#prompt-textarea[contenteditable="true"]');
-  if (!upload || !editor) throw new Error("找不到上传控件或提示词输入框");
+  const composer = await waitForChatGptComposer();
+  const upload = composer.upload;
+  let editor = composer.editor;
+  if (!upload && !editor) throw new Error("找不到上传控件和提示词输入框，请确认已进入可发送消息的 ChatGPT 对话页");
+  if (!upload) throw new Error("找不到上传控件，请确认当前 GPT 支持图片附件，并尝试手动点一次输入框旁的“添加附件”按钮");
+  if (!editor) throw new Error("找不到提示词输入框，请确认页面已加载完成且当前对话可发送消息");
 
   const files = await Promise.all(images.map((image) => dataUrlToFile(image.dataUrl, image.name, image.type)));
   const transfer = new DataTransfer();
@@ -183,36 +813,55 @@ async function uploadAndSend(images, prompt) {
   upload.files = transfer.files;
   upload.dispatchEvent(new Event("change", { bubbles: true }));
 
-  // 等待网页读取附件并生成预览。
-  await sleep(1800 + Math.max(0, files.length - 1) * 500);
-  editor.focus();
-  document.execCommand("selectAll", false);
-  document.execCommand("insertText", false, prompt);
-  editor.dispatchEvent(new InputEvent("input", {
-    bubbles: true,
-    inputType: "insertText",
-    data: prompt
-  }));
-
+  // 必须先等附件处理完成。附件完成时 ChatGPT 可能重建输入框，过早写入的提示词会被清空。
   let submit = null;
-  const readyDeadline = Date.now() + 120000;
-  while (Date.now() < readyDeadline) {
-    submit = document.querySelector("#composer-submit-button");
-    if (
-      submit &&
-      !submit.disabled &&
-      submit.getAttribute("data-testid") !== "stop-button" &&
-      submit.getAttribute("aria-label") !== "停止回答"
-    ) break;
+  const uploadDeadline = Date.now() + 120000;
+  while (Date.now() < uploadDeadline) {
+    const currentEditor = chatGptPromptEditor();
+    submit = chatGptSubmitButton(currentEditor || editor);
+    if (chatGptSubmitReady(submit)) break;
     await sleep(500);
   }
-  if (
-    !submit ||
-    submit.disabled ||
-    submit.getAttribute("data-testid") === "stop-button" ||
-    submit.getAttribute("aria-label") === "停止回答"
-  ) {
+  if (!chatGptSubmitReady(submit)) {
+    throw new Error("等待附件上传完成超时，尚未写入或发送提示词");
+  }
+
+  // 附件处理完成后重新获取输入框，避免持有已被页面替换的旧节点。
+  editor = chatGptPromptEditor();
+  if (!editor || !editor.isConnected) {
+    throw new Error("附件上传后提示词输入框已更新但无法重新定位，已阻止发送");
+  }
+  await fillChatGptPrompt(editor, prompt);
+
+  // 给网页状态一次同步机会，并再次确认提示词仍在输入框内。
+  await sleep(500);
+  const refreshedEditor = chatGptPromptEditor();
+  if (refreshedEditor && refreshedEditor !== editor) {
+    editor = refreshedEditor;
+    await fillChatGptPrompt(editor, prompt);
+  }
+  const writtenPrompt = normalizedPromptText(chatGptEditorText(editor));
+  const expectedPrompt = normalizedPromptText(prompt);
+  if (!writtenPrompt.includes(expectedPrompt)) {
+    throw new Error("发送前提示词从输入框消失，已阻止只发送图片");
+  }
+
+  const readyDeadline = Date.now() + 120000;
+  while (Date.now() < readyDeadline) {
+    submit = chatGptSubmitButton(editor);
+    if (chatGptSubmitReady(submit)) break;
+    await sleep(500);
+  }
+  if (!chatGptSubmitReady(submit)) {
     throw new Error("等待附件上传或发送按钮就绪超时");
+  }
+  const finalEditor = chatGptPromptEditor();
+  if (!finalEditor || !finalEditor.isConnected) {
+    throw new Error("点击发送前输入框被页面替换，已阻止只发送图片");
+  }
+  const finalPrompt = normalizedPromptText(chatGptEditorText(finalEditor));
+  if (!finalPrompt.includes(expectedPrompt)) {
+    throw new Error("点击发送前未检测到完整提示词，已阻止只发送图片");
   }
   submit.click();
 }
@@ -321,22 +970,53 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.type === "GPT_IMAGE_SCAN") {
-    const images = getGeneratedImages();
+    const libraryImages = getLibraryImages();
+    const images = libraryImages.length ? libraryImages : getGeneratedImages();
     sendResponse({ ok: true, count: images.length, images });
     return;
   }
 
+  if (message?.type === 'GPT_LIBRARY_SCAN_ALL') {
+    scanAllLibraryImages()
+      .then((images) => sendResponse({ ok: true, count: images.length, images }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message?.type === 'GPT_LIBRARY_VISIBLE_SCAN') {
+    sendResponse({ ok: true, images: currentLibraryMetadata() });
+    return;
+  }
+
+  if (message?.type === 'GPT_LIBRARY_SCROLL_NEXT') {
+    scrollLibraryNextPage()
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message?.type === 'GPT_LIBRARY_PANEL_STATUS') {
+    showLibraryFloatingStatus(message);
+    sendResponse({ ok: true });
+    return;
+  }
+
+  if (message?.type === 'GPT_LIBRARY_ACTION') {
+    actOnLibraryImage(message.libraryId, message.action)
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
   if (message?.type === "GPT_AUTOMATION_STATE") {
     const images = getGeneratedImages();
-    const submit = document.querySelector("#composer-submit-button");
     sendResponse({
       ok: true,
       images,
       platform: location.hostname === "www.doubao.com" ? "doubao" : "chatgpt",
       generating: location.hostname === "www.doubao.com"
         ? doubaoGenerating()
-        : submit?.getAttribute("data-testid") === "stop-button" ||
-          submit?.getAttribute("aria-label") === "停止回答"
+        : chatGptGenerating()
     });
     return;
   }
@@ -348,6 +1028,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const images = message.images || (message.image ? [message.image] : []);
     sender(images, message.prompt)
       .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message?.type === "GPT_CHATGPT_BLOB_DATA") {
+    const current = getChatGptGeneratedImages().find((image) => image.key === message.key);
+    const url = current?.url || message.url;
+    if (!url?.startsWith("blob:")) {
+      sendResponse({ ok: false, error: "目标不是可读取的页面 Blob 图片" });
+      return;
+    }
+    pageBlobToDataUrl(url)
+      .then((result) => sendResponse({ ok: true, ...result }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
