@@ -31,6 +31,33 @@ function canonicalImageKey(rawUrl) {
   }
 }
 
+function chatGptImageOwner(img) {
+  // 用户标记可能在内层附件节点，必须沿全部祖先检查，不能只看最近一层。
+  for (let node = img; node && node !== document.body; node = node.parentElement) {
+    if (node.getAttribute('data-message-author-role') === 'user' ||
+        node.getAttribute('data-turn') === 'user') return 'user';
+  }
+  if (img.closest('[data-message-author-role="assistant"], [data-turn="assistant"]')) return 'assistant';
+  const message = img.closest('article, [data-testid^="conversation-turn-"]');
+  if (message?.querySelector('[data-message-author-role="user"], [data-turn="user"]') &&
+      !message.querySelector('[data-message-author-role="assistant"], [data-turn="assistant"]')) return 'user';
+  return 'unknown';
+}
+
+function isChatGptGeneratedImage(img) {
+  if (chatGptImageOwner(img) === 'user') return false;
+  const explicitResult = img.closest(
+    '[data-testid="generated-image-gallery"], [data-testid="image-generation-result"], .group\\/imagegen-image'
+  );
+  if (explicitResult) return true;
+  // alt 文案和图片尺寸不能证明图片是生成结果；未知区域必须有生图容器依据。
+  if (chatGptImageOwner(img) !== 'assistant') return false;
+  const url = img.currentSrc || img.src || '';
+  return Boolean(img.closest('[id^="image-"]')) ||
+    /\/backend-api\/(?:estuary\/content|files\/.*\/content)/i.test(url) ||
+    /^(?:blob:)/i.test(url) || /(?:generated|生成的?图像|生成的?图片)/i.test(img.alt || '');
+}
+
 function getChatGptGeneratedImages() {
   const images = [];
   const seen = new Set();
@@ -40,27 +67,42 @@ function getChatGptGeneratedImages() {
   const galleries = Array.from(document.querySelectorAll('[data-testid="generated-image-gallery"]'));
   for (let galleryIndex = 0; galleryIndex < galleries.length; galleryIndex += 1) {
     const gallery = galleries[galleryIndex];
+    if (chatGptImageOwner(gallery) === 'user') continue;
     const messageIds = gallery.closest('[data-chatgpt-search-message-ids]')
       ?.getAttribute('data-chatgpt-search-message-ids')
       ?.trim()
       ?.split(/\s+/);
     const messageId = messageIds?.[0] || `gallery-${galleryIndex}`;
+    // ChatGPT 会在不同版本里改变 aria-label，甚至暂时不渲染按钮；
+    // 不能因为按钮选择器失效就把整组生成图判定为 0 张。
     const thumbnailButtons = Array.from(
       gallery.querySelectorAll(
         'button[aria-label^="显示生成的图像"], button[aria-label^="Show generated image"]'
       )
     );
+    const galleryUrls = new Set();
+    const thumbnailImages = thumbnailButtons.length
+      ? thumbnailButtons.map((button) => button.querySelector('img')).filter(Boolean)
+      : Array.from(gallery.querySelectorAll('img')).filter((img) => {
+        const url = img.currentSrc || img.src;
+        return Boolean(url && !url.startsWith('data:image/'));
+      });
 
-    for (let buttonIndex = 0; buttonIndex < thumbnailButtons.length; buttonIndex += 1) {
-      const button = thumbnailButtons[buttonIndex];
-      const img = button.querySelector('img');
+    for (let buttonIndex = 0; buttonIndex < thumbnailImages.length; buttonIndex += 1) {
+      const img = thumbnailImages[buttonIndex];
+      if (!isChatGptGeneratedImage(img)) continue;
       const url = img?.currentSrc || img?.src;
       if (!url) continue;
-      const label = button.getAttribute('aria-label') || "";
-      const number = Number(label.match(/(\d+)\s*$/)?.[1]) || buttonIndex + 1;
+      const urlKey = canonicalImageKey(url);
+      if (!thumbnailButtons.length && galleryUrls.has(urlKey)) continue;
+      galleryUrls.add(urlKey);
+      const button = img.closest('button');
+      const label = button?.getAttribute('aria-label') || "";
+      const number = Number(label.match(/(\d+)\s*$/)?.[1]) || galleryUrls.size;
       const key = `gallery:${messageId}:${number}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      seen.add(urlKey);
       images.push({
         url,
         key,
@@ -79,6 +121,7 @@ function getChatGptGeneratedImages() {
       '[data-testid="image-generation-result"] img,' +
       '[data-message-author-role="assistant"] img,' +
       '[data-turn="assistant"] img,' +
+      'main img[src*="/backend-api/estuary/content"], main img[src*="/backend-api/files/"],' +
       'img[alt*="Generated"], img[alt*="generated"], img[alt*="生成"]'
     )
   );
@@ -86,6 +129,7 @@ function getChatGptGeneratedImages() {
   for (const img of candidates) {
     // 新版画廊已由其带编号的缩略图按钮精确收集，跳过主图及重复缩略图。
     if (img.closest('[data-testid="generated-image-gallery"]')) continue;
+    if (!isChatGptGeneratedImage(img)) continue;
     const url = img.currentSrc || img.src;
     if (!url) continue;
 
@@ -673,15 +717,22 @@ async function pageBlobToDataUrl(url) {
 }
 
 function chatGptPromptEditor() {
-  return (
-    document.querySelector('#prompt-textarea[contenteditable="true"]') ||
-    document.querySelector('#prompt-textarea textarea') ||
-    document.querySelector('form [contenteditable="true"].ProseMirror') ||
-    document.querySelector('main [contenteditable="true"][role="textbox"]') ||
-    document.querySelector('textarea[name="prompt-textarea"]') ||
-    document.querySelector('textarea[placeholder*="消息"]') ||
-    document.querySelector('textarea[placeholder*="Message"]')
-  );
+  const selectors = [
+    '#prompt-textarea[contenteditable="true"]', '#prompt-textarea textarea',
+    'textarea#prompt-textarea', '[data-type="unified-composer"] [contenteditable="true"]',
+    'form [contenteditable="true"].ProseMirror',
+    'main [contenteditable="true"][role="textbox"]',
+    'textarea[name="prompt-textarea"]', 'textarea[placeholder*="消息"]',
+    'textarea[placeholder*="Message"]'
+  ];
+  for (const selector of selectors) {
+    const editor = Array.from(document.querySelectorAll(selector)).find((node) =>
+      node.isConnected && node.getClientRects().length && !node.disabled &&
+      node.getAttribute('aria-disabled') !== 'true'
+    );
+    if (editor) return editor;
+  }
+  return null;
 }
 
 function chatGptUploadInput() {
@@ -710,8 +761,8 @@ async function waitForChatGptComposer() {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline && (!upload || !editor)) {
     await sleep(200);
-    upload ||= chatGptUploadInput();
-    editor ||= chatGptPromptEditor();
+    upload = chatGptUploadInput();
+    editor = chatGptPromptEditor();
   }
   return { upload, editor };
 }
@@ -773,6 +824,11 @@ async function fillChatGptPrompt(editor, prompt) {
 
   const deadline = Date.now() + 8000;
   while (Date.now() < deadline) {
+    editor = chatGptPromptEditor();
+    if (!editor) {
+      await sleep(200);
+      continue;
+    }
     editor.focus();
     if (editor instanceof HTMLTextAreaElement) {
       setTextareaValue(editor, prompt);
@@ -792,7 +848,7 @@ async function fillChatGptPrompt(editor, prompt) {
 
     await sleep(250);
     const actual = normalizedPromptText(chatGptEditorText(editor));
-    if (actual === expected || actual.includes(expected)) return;
+    if (editor.isConnected && actual === expected) return;
     await sleep(250);
   }
   throw new Error("提示词未能写入输入框，已阻止只发送图片；请刷新 ChatGPT 页面后重试");
@@ -813,46 +869,36 @@ async function uploadAndSend(images, prompt) {
   upload.files = transfer.files;
   upload.dispatchEvent(new Event("change", { bubbles: true }));
 
-  // 必须先等附件处理完成。附件完成时 ChatGPT 可能重建输入框，过早写入的提示词会被清空。
+  // 先写文字再等发送按钮，避免新版空输入框始终禁用发送造成死锁。
+  // 等待期间每次重新定位；附件处理触发重绘或清空文字时重新补全提示词。
   let submit = null;
-  const uploadDeadline = Date.now() + 120000;
-  while (Date.now() < uploadDeadline) {
-    const currentEditor = chatGptPromptEditor();
-    submit = chatGptSubmitButton(currentEditor || editor);
-    if (chatGptSubmitReady(submit)) break;
-    await sleep(500);
-  }
-  if (!chatGptSubmitReady(submit)) {
-    throw new Error("等待附件上传完成超时，尚未写入或发送提示词");
-  }
-
-  // 附件处理完成后重新获取输入框，避免持有已被页面替换的旧节点。
-  editor = chatGptPromptEditor();
-  if (!editor || !editor.isConnected) {
-    throw new Error("附件上传后提示词输入框已更新但无法重新定位，已阻止发送");
-  }
-  await fillChatGptPrompt(editor, prompt);
-
-  // 给网页状态一次同步机会，并再次确认提示词仍在输入框内。
-  await sleep(500);
-  const refreshedEditor = chatGptPromptEditor();
-  if (refreshedEditor && refreshedEditor !== editor) {
-    editor = refreshedEditor;
-    await fillChatGptPrompt(editor, prompt);
-  }
-  const writtenPrompt = normalizedPromptText(chatGptEditorText(editor));
   const expectedPrompt = normalizedPromptText(prompt);
-  if (!writtenPrompt.includes(expectedPrompt)) {
-    throw new Error("发送前提示词从输入框消失，已阻止只发送图片");
-  }
-
+  if (!expectedPrompt) throw new Error("提示词内容为空，已阻止发送附件");
+  await sleep(1000);
+  let readySince = 0;
   const readyDeadline = Date.now() + 120000;
   while (Date.now() < readyDeadline) {
+    editor = chatGptPromptEditor();
+    if (!editor) {
+      readySince = 0;
+      await sleep(250);
+      continue;
+    }
+    if (normalizedPromptText(chatGptEditorText(editor)) !== expectedPrompt) {
+      readySince = 0;
+      await fillChatGptPrompt(editor, prompt);
+      continue;
+    }
     submit = chatGptSubmitButton(editor);
-    if (chatGptSubmitReady(submit)) break;
+    const composerRoot = editor.closest('form') || editor.closest('[data-type="unified-composer"]') || editor.parentElement;
+    const uploading = composerRoot?.querySelector('[role="progressbar"], [aria-busy="true"], [data-testid*="uploading"]');
+    if (chatGptSubmitReady(submit) && !uploading && !chatGptGenerating()) {
+      readySince ||= Date.now();
+      if (Date.now() - readySince >= 1500) break;
+    } else readySince = 0;
     await sleep(500);
   }
-  if (!chatGptSubmitReady(submit)) {
+  if (!readySince || Date.now() >= readyDeadline || !chatGptSubmitReady(submit)) {
     throw new Error("等待附件上传或发送按钮就绪超时");
   }
   const finalEditor = chatGptPromptEditor();
@@ -860,7 +906,7 @@ async function uploadAndSend(images, prompt) {
     throw new Error("点击发送前输入框被页面替换，已阻止只发送图片");
   }
   const finalPrompt = normalizedPromptText(chatGptEditorText(finalEditor));
-  if (!finalPrompt.includes(expectedPrompt)) {
+  if (finalPrompt !== expectedPrompt) {
     throw new Error("点击发送前未检测到完整提示词，已阻止只发送图片");
   }
   submit.click();

@@ -74,3 +74,52 @@ body.embedded h2 { font-size: 15px; }
 body.embedded table { font-size: 11px; }
 body.embedded th, body.embedded td { padding: 7px 4px; }
 body.embedded pre { min-height: 110px; max-height: 220px; font-size: 11px; }
+
+/* 素材并排、高级设置渐进展开；操作区始终可达。 */
+main { padding-bottom: 76px; }
+header { align-items: center; }
+header p { margin: 0; font-size: 13px; }
+.upload-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.picker { display: block; min-width: 0; padding: 12px; }
+.picker input { width: 100%; min-width: 0; font-size: 12px; }
+.picker input::file-selector-button { padding: 6px 8px; margin-right: 8px; border: 1px solid #cbd5d1; border-radius: 6px; background: #fff; cursor: pointer; }
+.field-hint { display: block; margin-top: 5px; color: #68736f; font-size: 11px; font-weight: 400; }
+.fold { border-top: 1px solid #e3e9e6; padding-top: 10px; min-width: 0; }
+summary { cursor: pointer; color: #35473f; font-size: 13px; font-weight: 700; line-height: 1.6; }
+summary span { color: #78827e; font-size: 11px; font-weight: 400; margin-left: 8px; }
+summary:focus-visible, button:focus-visible { outline: 2px solid #0c9974; outline-offset: 3px; }
+.fold[open] > summary { margin-bottom: 12px; }
+.fold .wide-field { display: block; margin-top: 10px; }
+.fold .wide-field.hidden { display: none; }
+.prompt-grid .check-setting { display: flex; align-items: center; gap: 7px; }
+.prompt-grid .check-setting input { width: auto; margin: 0; }
+.history-actions { margin: 14px 0 10px; }
+.history-actions button { font-size: 12px; }
+.table-scroll { overflow-x: auto; }
+.table-scroll table { min-width: 650px; }
+.log-panel > summary { font-size: 15px; }
+.actions, body.embedded .actions {
+  position: fixed; z-index: 20; bottom: 12px; left: 50%; transform: translateX(-50%);
+  width: min(1120px, calc(100% - 24px)); padding: 12px;
+  border: 1px solid #d8e3de; border-radius: 12px; background: #fff;
+  box-shadow: 0 4px 24px rgba(20,50,40,.15); align-items: center;
+}
+.actions button { flex: 1; }
+body.embedded main { padding-bottom: 90px; }
+body.embedded .setup { gap: 12px; }
+body.embedded .upload-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+body.embedded .upload-grid .picker:last-child { grid-column: 1 / -1; }
+body.embedded .field-hint { font-size: 10px; }
+body.embedded .settings { grid-template-columns: 1fr 1fr; }
+@media (max-width: 720px) {
+  .upload-grid { grid-template-columns: 1fr 1fr; }
+  .upload-grid .picker:last-child { grid-column: 1 / -1; }
+  .binding-row { flex-wrap: wrap; }
+  .binding-row select { flex-basis: 100%; }
+  h1 { font-size: 23px; }
+}
+@media (max-width: 360px) {
+  .upload-grid, body.embedded .upload-grid, body.embedded .prompt-grid, body.embedded .settings { grid-template-columns: 1fr; }
+  .actions, body.embedded .actions { padding: 8px; gap: 5px; }
+  .actions button { padding: 9px 5px; font-size: 11px; }
+}

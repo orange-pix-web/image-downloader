@@ -109,6 +109,7 @@ function managerSettings() {
 }
 
 async function saveManagerSettings() {
+  updateSettingsSummary();
   await chrome.storage.local.set({ managerSettings: managerSettings() });
 }
 
@@ -148,6 +149,20 @@ async function restoreManagerSettings() {
 
 function updatePresetVisibility() {
   $("#custom-template-wrap").classList.toggle("hidden", $("#prompt-preset").value !== "custom");
+  if ($("#prompt-preset").value === "custom") $("#advanced-prompts").open = true;
+  updateSettingsSummary();
+}
+
+function updateSettingsSummary() {
+  const settings = managerSettings();
+  const active = [];
+  if (settings.brandName) active.push(`品牌：${settings.brandName}`);
+  if (settings.specifiedCopy) active.push("指定文案");
+  if (settings.forbiddenReferenceText || settings.productTextRules) active.push("文字替换");
+  if (settings.fixedPrompt) active.push({ append: "提示词追加", prepend: "提示词前置", replace: "替代 Markdown" }[settings.fixedPosition]);
+  $("#prompt-settings-summary").textContent = active.filter(Boolean).join(" · ") || "品牌、文字替换、附件与模板";
+  $("#disclaimer-summary").textContent = settings.disclaimerEnabled ? "已启用" : "未启用";
+  $("#runtime-summary").textContent = `最多等 ${settings.timeoutMinutes} 分钟 · ${settings.autoRefresh ? "自动刷新" : "不自动刷新"}${settings.newChatEachTask ? " · 每任务新对话" : ""}`;
 }
 
 function log(message) {
@@ -1201,6 +1216,7 @@ $("#prompt-preset").addEventListener("change", updatePresetVisibility);
 async function initializeManager() {
   log(`任务管理器版本 ${chrome.runtime.getManifest().version} 已加载。`);
   await restoreManagerSettings();
+  updateSettingsSummary();
   const savedBinding = await chrome.storage.local.get("managerTargetTabId");
   boundTabId = Number(savedBinding.managerTargetTabId) || null;
   await refreshTabList(boundTabId);
