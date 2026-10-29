@@ -1,4 +1,25 @@
 const $ = (selector) => document.querySelector(selector);
+$('#open-workflow').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'GPT_WORKFLOW_OPEN' }));
+$('#open-workflow-nav').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'GPT_WORKFLOW_OPEN' }));
+$('#open-grok-nav').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'GROK_OPEN_WINDOW' }));
+
+function showDashboardStep(step) {
+  for (const section of document.querySelectorAll('[data-step-section]')) section.hidden = section.dataset.stepSection !== step;
+  for (const button of document.querySelectorAll('.step-nav [data-step]')) {
+    const active = button.dataset.step === step;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+  }
+  sessionStorage.setItem('dashboardActiveStep', step);
+}
+
+for (const button of document.querySelectorAll('.step-nav [data-step]')) {
+  button.addEventListener('click', () => showDashboardStep(button.dataset.step));
+}
+for (const button of document.querySelectorAll('.platform-choice')) {
+  button.addEventListener('click', () => selectPlatform(button.dataset.platform).catch(error => log(error.message)));
+}
+$('#open-grok-window').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'GROK_OPEN_WINDOW' }));
 const imageInput = $("#images");
 const referenceInput = $("#references");
 const promptInput = $("#prompts");
@@ -11,6 +32,7 @@ const pauseButton = $("#pause");
 const stateBadge = $("#run-state");
 const targetTabSelect = $("#target-tab");
 const bindingDetail = $("#binding-detail");
+let activePlatform = sessionStorage.getItem('dashboardPlatform') || 'chatgpt';
 
 if (
   window.top !== window ||
@@ -85,6 +107,9 @@ function managerSettings() {
     refreshMinutes: Math.max(1, Number($("#refresh-minutes").value) || 5),
     maxRefreshes: Math.max(1, Number($("#max-refreshes").value) || 2),
     newChatEachTask: $("#new-chat-each-task").checked,
+    grokEnabled: $("#grok-enabled").checked,
+    grokTabId: Number($("#grok-tab").value) || null,
+    grokInstruction: $("#grok-instruction").value.trim(),
     promptPreset: $("#prompt-preset").value,
     referenceMode: $("#reference-mode").value,
     brandName: $("#brand-name").value.trim(),
@@ -124,6 +149,9 @@ async function restoreManagerSettings() {
   $("#refresh-minutes").value = value.refreshMinutes ?? 5;
   $("#max-refreshes").value = value.maxRefreshes ?? 2;
   $("#new-chat-each-task").checked = value.newChatEachTask === true;
+  $("#grok-enabled").checked = value.grokEnabled === true;
+  if (value.grokInstruction) $("#grok-instruction").value = value.grokInstruction;
+  await refreshGrokTabs(value.grokTabId);
   $("#prompt-preset").value = value.promptPreset || "original";
   $("#reference-mode").value = value.referenceMode || "auto";
   $("#brand-name").value = value.brandName || "";
@@ -155,6 +183,7 @@ function updatePresetVisibility() {
 
 function updateSettingsSummary() {
   const settings = managerSettings();
+  $("#grok-summary").textContent = settings.grokEnabled ? "已启用 → ChatGPT" : "未启用";
   const active = [];
   if (settings.brandName) active.push(`品牌：${settings.brandName}`);
   if (settings.specifiedCopy) active.push("指定文案");
@@ -175,12 +204,106 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isGrokPage(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    return url.protocol === 'https:' && ['grok.com', 'www.grok.com'].includes(url.hostname);
+  } catch { return false; }
+}
+
+async function refreshGrokTabs(preferredId) {
+  const allTabs = await chrome.tabs.query({});
+  const tabs = allTabs.filter(tab => isGrokPage(tab.url) || isGrokPage(tab.pendingUrl));
+  const select = $("#grok-tab");
+  const previousId = preferredId || select.value;
+  select.replaceChildren(new Option('请选择已登录的 Grok 页面', ''));
+  for (const tab of tabs) select.add(new Option(`${tab.title || 'Grok'} — ${tab.url || tab.pendingUrl}`, String(tab.id)));
+  select.value = tabs.some(tab => tab.id === Number(previousId)) ? String(previousId) : tabs.length === 1 ? String(tabs[0].id) : '';
+  $("#grok-connection").textContent = tabs.length ? `找到 ${tabs.length} 个 Grok 页面，点击“检查连接”确认控件。` : `已检查当前浏览器的 ${allTabs.length} 个标签页，未找到 grok.com。请确认 Grok 在同一浏览器、同一用户配置中打开；X 内嵌 Grok 不在此列表中。`;
+}
+
+async function checkGrokConnection() {
+  const output = $("#grok-connection");
+  const id = Number($("#grok-tab").value);
+  if (!id) { output.textContent = '未选择 Grok 标签页，请先刷新列表并选择。'; return; }
+  try {
+    const result = await chrome.tabs.sendMessage(id, { type: 'GROK_DIAGNOSTICS' });
+    if (!result?.ok) throw new Error('当前页面仍运行旧版适配器，请重新加载扩展并刷新 Grok。');
+    output.textContent = `脚本已连接；输入框：${result.editor ? '找到' : '未找到'}；上传控件：${result.uploads} 个；可识别回复：${result.replies} 个。${result.editor ? '' : '请确认已登录并进入普通对话。'}${result.uploads ? '' : '请展开附件菜单后再检查。'}`;
+  } catch (error) {
+    output.textContent = /Receiving end|Could not establish connection/.test(error.message || '')
+      ? '无法连接 Grok 脚本。请在扩展管理页重新加载插件，允许访问 grok.com，然后刷新 Grok 标签页。'
+      : error.message;
+  }
+  log(output.textContent);
+}
+
+async function generateGrokPrompt(task) {
+  const id = task.grok.tabId;
+  if (!id) throw new Error('没有选择 Grok 标签页，请选择后重新生成任务列表');
+  const tab = await chrome.tabs.get(id);
+  if (!isGrokPage(tab.url)) throw new Error('绑定的 Grok 页面已失效或尚未加载完成');
+  if (!task.grokState) {
+    const baseline = await messageTab(id, { type: 'GROK_STATE' });
+    if (!baseline?.ok || baseline.generating) throw new Error('Grok 未就绪或正在回复，请稍后重试');
+    const images = await Promise.all([...(task.referenceImages || []), task.image].map(async file => ({
+      name: file.name, type: file.type, dataUrl: await fileToDataUrl(file)
+    })));
+    task.grokState = { baseline: baseline.text, stage: 'sending' };
+    await saveQueue();
+    const sent = await messageTab(id, {
+      type: 'GROK_SEND', images,
+      prompt: `${task.grok.instruction}\n\n产品：${task.product}。前${task.referenceImages?.length || 0}张为参考图，最后一张为产品图。\n补充要求：\n${task.prompt}\n请输出${task.expected}张独立图片所需的完整提示词。`
+    });
+    if (!sent?.ok) throw new Error(sent?.error || 'Grok 上传或发送失败');
+    task.grokState.stage = 'waiting';
+    await saveQueue();
+    log(`${task.product}：已发送到 Grok，等待提示词。`);
+  } else if (task.grokState.stage === 'sending') {
+    throw new Error('Grok 发送阶段中断，无法确认是否发出；请检查 Grok 后重新生成任务列表，避免重复发送');
+  }
+  const deadline = Date.now() + 10 * 60 * 1000;
+  let previous = '', stableSince = 0;
+  while (Date.now() < deadline) {
+    if (paused) throw new Error('Grok 提示词等待已暂停，继续执行时将恢复等待');
+    const state = await messageTab(id, { type: 'GROK_STATE' });
+    if (!state?.ok) throw new Error(state?.error || '无法读取 Grok 回复');
+    if (state.text && state.text !== task.grokState.baseline && !state.generating) {
+      if (state.text !== previous) { previous = state.text; stableSince = Date.now(); }
+      if (Date.now() - stableSince >= 15000) {
+        log(`${task.product}：Grok 提示词已收到，准备交给 ChatGPT。`);
+        return `${state.text}\n\n执行要求：生成${task.expected}张独立图片。\n${task.prompt}`;
+      }
+    } else { previous = ''; stableSince = 0; }
+    await sleep(2000);
+  }
+  throw new Error('等待 Grok 提示词超时，可点击开始执行继续等待');
+}
+
 function isAiPage(url) {
   return /^https:\/\/(chatgpt\.com|chat\.openai\.com|www\.doubao\.com)\//.test(url || "");
 }
 
+function isPlatformPage(url, platform = activePlatform) {
+  return platform === 'doubao'
+    ? /^https:\/\/www\.doubao\.com\//.test(url || '')
+    : /^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(url || '');
+}
+
+async function selectPlatform(platform) {
+  activePlatform = platform;
+  sessionStorage.setItem('dashboardPlatform', platform);
+  for (const button of document.querySelectorAll('.platform-choice')) {
+    const active = button.dataset.platform === platform;
+    button.classList.toggle('active', active);
+    if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
+  }
+  $('#platform-binding-title').textContent = platform === 'doubao' ? '豆包生图页面' : 'ChatGPT 生图页面';
+  await refreshTabList();
+}
+
 async function refreshTabList(preferredId = boundTabId) {
-  const tabs = (await chrome.tabs.query({})).filter((tab) => isAiPage(tab.url));
+  const tabs = (await chrome.tabs.query({})).filter((tab) => isPlatformPage(tab.url));
   targetTabSelect.innerHTML = "";
   for (const tab of tabs) {
     const option = document.createElement("option");
@@ -190,8 +313,9 @@ async function refreshTabList(preferredId = boundTabId) {
     targetTabSelect.appendChild(option);
   }
   if (!tabs.length) {
-    targetTabSelect.add(new Option("没有找到 ChatGPT 或豆包页面", ""));
-    bindingDetail.textContent = "请先打开一个 AI 对话页面，再刷新列表。";
+    const label = activePlatform === 'doubao' ? '豆包' : 'ChatGPT';
+    targetTabSelect.add(new Option(`没有找到 ${label} 页面`, ""));
+    bindingDetail.textContent = `当前只显示 ${label} 页面；可在上方切换系统。`;
     return;
   }
   const selected = tabs.find((tab) => tab.id === Number(preferredId));
@@ -206,11 +330,11 @@ async function showBinding() {
   }
   try {
     const tab = await chrome.tabs.get(boundTabId);
-    if (!isAiPage(tab.url)) throw new Error();
+    if (!isPlatformPage(tab.url)) throw new Error();
     bindingDetail.textContent = `已锁定：${tab.title || "未命名页面"} ｜ ${tab.url}`;
     targetTabSelect.value = String(boundTabId);
   } catch {
-    bindingDetail.textContent = `原绑定标签页（ID ${boundTabId}）已关闭或不再是 AI 页面，请手动重新绑定。`;
+    bindingDetail.textContent = `原绑定标签页（ID ${boundTabId}）不属于当前系统或已关闭，请在当前列表中重新绑定。`;
   }
 }
 
@@ -379,6 +503,7 @@ function extractPrompt(text) {
   let prompt = (fenced ? fenced[1] : text).trim();
   const removableEndingSentences = [
     "每完成一张都重新读取对应提示词，不得沿用上一张的产品位置、文字位置或背景构图；输出前逐张核对产品名称、包装和全部指定中文。",
+    "请按模板编号【01、02、03、04、05、06、07、08、09、10】依次生成10张独立图片。",
     "请按模板编号【01、02、03、04、05、06、07、08、09】依次生成9张独立图片。"
   ];
 
@@ -634,6 +759,11 @@ async function buildTasks() {
   }
 
   const promptSettings = managerSettings();
+  if (promptSettings.grokEnabled) {
+    if (!promptSettings.grokTabId || !promptSettings.grokInstruction) return log('请选择 Grok 页面并填写给 Grok 的要求。');
+    const target = await chrome.tabs.get(boundTabId);
+    if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(target.url || '')) return log('Grok 联动需要绑定 ChatGPT 生图页面。');
+  }
   if (promptSettings.promptPreset === "custom" && !promptSettings.customTemplate.trim()) {
     log("已选择自定义模板，但模板内容为空。");
     return;
@@ -647,7 +777,7 @@ async function buildTasks() {
 
   async function addProductTasks({ product, image, referenceFiles, promptFiles, sellingPointsText = "", folderMode = false }) {
     if (!image) return log(`未匹配：${product} 找不到产品图片。`);
-    if (!promptFiles.length && promptSettings.promptPreset === "original" && !promptSettings.fixedPrompt) {
+    if (!promptFiles.length && promptSettings.promptPreset === "original" && !promptSettings.fixedPrompt && !promptSettings.grokEnabled) {
       return log(`未匹配：${product} 没有提示词；请提供 Markdown、选择预设或填写固定提示词。`);
     }
     if (["replace", "composition"].includes(promptSettings.promptPreset) && !referenceFiles.length) {
@@ -675,18 +805,20 @@ async function buildTasks() {
         let prompt = buildTaskPrompt(markdownPrompt, product, referenceImages.length, expected, promptSettings);
         const batchRequirement = batchReferenceRequirement(referenceImages, referenceImages.length + 1, sellingPoints, oneToOne);
         if (batchRequirement) prompt = `${prompt}\n\n${batchRequirement}`.trim();
+        if (!prompt && promptSettings.grokEnabled) prompt = `为${product}生成${expected}张独立图片。`;
         if (!prompt) {
           log(`提示词为空：${product} / ${promptFile.name}，已跳过。`);
           continue;
         }
         const batchLabel = batches.length > 1 ? `第${batchIndex + 1}/${batches.length}批` : "";
         const referenceSignature = referenceImages.map((file) => `${file.name}:${file.size}:${file.lastModified}`).join("|");
-        const baseId = await digest(`${product}|${image.name}|${image.size}|${referenceSignature}|${promptSettings.promptPreset}|${prompt}|${JSON.stringify(disclaimer)}`);
+        const baseId = await digest(`${product}|${image.name}|${image.size}|${referenceSignature}|${promptSettings.promptPreset}|${prompt}|${JSON.stringify(disclaimer)}|${promptSettings.grokEnabled ? promptSettings.grokInstruction : ''}`);
         const startNumber = nextNumber.get(product) || Math.max(1, Number(productStarts[product]) || 1);
         const endNumber = startNumber + expected - 1;
         const id = await makeTaskId(baseId, startNumber);
         tasks.push({
           id, baseId, product, image, referenceImages, prompt, forbiddenWords, disclaimer,
+          grok: promptSettings.grokEnabled ? { tabId: promptSettings.grokTabId, instruction: promptSettings.grokInstruction } : null,
           promptPreset: promptSettings.promptPreset,
           promptFile: `${promptFile.name}${batchLabel ? `（${batchLabel}）` : ""}`,
           batchIndex: batchIndex + 1,
@@ -1075,6 +1207,11 @@ async function run() {
 
       try {
         const tab = await findAiTab(task.runtime?.tabId || task.targetTabId);
+        if (task.grok && !task.grokPrompt) {
+          if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(tab.url || '')) throw new Error('Grok 提示词流程需要绑定 ChatGPT 生图页面');
+          task.grokPrompt = await generateGrokPrompt(task);
+          await saveQueue();
+        }
         let images;
         if (task.runtime?.stage === "sending" && Array.isArray(task.runtime?.baselineKeys)) {
           task.runtime.stage = "waiting-recovered";
@@ -1113,7 +1250,7 @@ async function run() {
             }
             const before = await messageTab(tab.id, { type: "GPT_AUTOMATION_STATE" });
             baseline = new Set((before.images || []).map((image) => image.key));
-            let outgoingPrompt = task.prompt;
+            let outgoingPrompt = task.grokPrompt || task.prompt;
             if (
               before.platform === "doubao" &&
               task.disclaimer?.enabled &&
@@ -1190,6 +1327,10 @@ async function run() {
 }
 
 $("#build").addEventListener("click", buildTasks);
+$("#refresh-grok").addEventListener("click", () => refreshGrokTabs($("#grok-tab").value).catch(error => {
+  $("#grok-connection").textContent = `读取标签页失败：${error.message}`;
+}));
+$("#check-grok").addEventListener("click", checkGrokConnection);
 $("#refresh-tabs").addEventListener("click", () => refreshTabList());
 $("#bind-tab").addEventListener("click", bindSelectedTab);
 startButton.addEventListener("click", run);
@@ -1214,8 +1355,12 @@ for (const input of document.querySelectorAll(".settings input, .prompt-builder 
 $("#prompt-preset").addEventListener("change", updatePresetVisibility);
 
 async function initializeManager() {
+  showDashboardStep(sessionStorage.getItem('dashboardActiveStep') || 'materials');
+  for (const button of document.querySelectorAll('.platform-choice')) button.classList.toggle('active', button.dataset.platform === activePlatform);
+  $('#platform-binding-title').textContent = activePlatform === 'doubao' ? '豆包生图页面' : 'ChatGPT 生图页面';
   log(`任务管理器版本 ${chrome.runtime.getManifest().version} 已加载。`);
   await restoreManagerSettings();
+  if (!$("#grok-tab").value) await refreshGrokTabs();
   updateSettingsSummary();
   const savedBinding = await chrome.storage.local.get("managerTargetTabId");
   boundTabId = Number(savedBinding.managerTargetTabId) || null;

@@ -11,22 +11,39 @@
       <header>
         <div>
           <h1>批量生图</h1>
+          <button id="open-workflow" type="button" class="header-shortcut">打开两阶段工作流</button>
+          <button id="open-grok-window" type="button" class="secondary header-shortcut">打开 Grok 提示词独立窗口</button>
           <p>导入素材 → 生成任务 → 开始执行</p>
         </div>
         <span id="run-state" class="badge">未开始</span>
       </header>
 
+      <nav class="system-nav" aria-label="系统功能">
+        <button id="open-workflow-nav" type="button">两阶段工作流</button>
+        <button type="button" class="active platform-choice" data-platform="chatgpt" aria-current="page">ChatGPT 批量生图</button>
+        <button type="button" class="platform-choice" data-platform="doubao">豆包批量生图</button>
+        <button id="open-grok-nav" type="button">Grok 提示词</button>
+      </nav>
+
+      <nav class="step-nav" aria-label="批量生图设置步骤">
+        <button type="button" data-step="materials" class="active">1 页面与素材</button>
+        <button type="button" data-step="prompts">2 提示词设置</button>
+        <button type="button" data-step="disclaimer">3 图片声明</button>
+        <button type="button" data-step="runtime">4 运行设置</button>
+        <button type="button" data-step="tasks">5 任务与日志</button>
+      </nav>
+
       <section class="panel setup">
-        <div class="tab-binding">
-          <strong>当前绑定的生图页面</strong>
+        <div class="tab-binding" data-step-section="materials">
+          <strong id="platform-binding-title">ChatGPT 生图页面</strong>
           <div class="binding-row">
             <select id="target-tab"><option value="">正在读取页面…</option></select>
             <button id="refresh-tabs" type="button" class="secondary">刷新列表</button>
             <button id="bind-tab" type="button">绑定所选页面</button>
           </div>
-          <p id="binding-detail" class="note">任务只会发送到这里，不会自动切换到其他标签页。</p>
+          <p id="binding-detail" class="note">Grok 在下方“Grok 先生成提示词”中单独选择；这里绑定接收提示词的生图页面。</p>
         </div>
-        <div class="upload-grid">
+        <div class="upload-grid" data-step-section="materials">
         <label class="picker">
           <strong>产品图片</strong><span class="field-hint">必选 · 支持多选</span>
           <input id="images" type="file" accept="image/png,image/jpeg,image/webp" multiple />
@@ -40,7 +57,7 @@
           <input id="prompts" type="file" accept=".md,text/markdown,text/plain" multiple />
         </label>
         </div>
-        <details class="fold">
+        <details class="fold" data-step-section="materials">
         <summary>从文件夹批量导入 <span>已有完整任务文件夹时使用</span></summary>
         <label class="picker folder-picker">
           <strong>或者：选择完整任务文件夹</strong>
@@ -49,8 +66,16 @@
         </label>
         </details>
 
-        <div class="prompt-builder">
+        <div class="prompt-builder" data-step-section="prompts">
           <strong>生成设置</strong>
+          <details class="fold">
+            <summary>Grok 先生成提示词 <span id="grok-summary">未启用</span></summary>
+            <label class="check-setting"><input id="grok-enabled" type="checkbox" />上传参考图和产品图到 Grok，再交给 ChatGPT 生图</label>
+            <div class="binding-row"><select id="grok-tab"><option value="">请选择已登录的 Grok 页面</option></select><button id="refresh-grok" type="button" class="secondary">刷新 Grok 页面</button><button id="check-grok" type="button" class="secondary">检查连接</button></div>
+            <p id="grok-connection" class="note" role="status">请选择与扩展安装在同一浏览器中的 Grok 标签页。</p>
+            <label class="wide-field">给 Grok 的要求<textarea id="grok-instruction" rows="3">根据参考图的构图、风格、色彩和文案层级，为最后一张产品图编写中文生图提示词。保留产品包装、品牌与产品名称，替换参考图中的旧产品。只输出可直接用于 ChatGPT 生图的完整提示词，不要解释，不要生成图片。</textarea></label>
+            <p class="note">参考图先上传，产品图最后上传。现有提示词作为补充要求。两个标签页均需保持登录。</p>
+          </details>
           <div class="prompt-grid">
             <label>生图模式
               <select id="prompt-preset">
@@ -97,7 +122,9 @@
             <textarea id="custom-template" rows="7" placeholder="支持 {产品名}、{品牌名}、{指定文案}、{禁用文字}、{文字替换要求}、{Markdown提示词}、{参考图数量}、{产品图序号}、{生成数量}"></textarea>
           </label>
           </details>
-          <details class="fold">
+        </div>
+        <div class="prompt-builder" data-step-section="disclaimer">
+          <details class="fold" id="disclaimer-settings" open>
           <summary>图片声明 <span id="disclaimer-summary">未启用</span></summary>
           <div class="disclaimer-box">
             <label class="check-setting"><input id="disclaimer-enabled" type="checkbox" />启用图片声明</label>
@@ -135,7 +162,7 @@
           </details>
         </div>
 
-        <details class="fold">
+        <details class="fold" data-step-section="runtime" open>
         <summary>运行与历史设置 <span id="runtime-summary">等待、自动刷新与新对话</span></summary>
         <div class="settings fold-content">
           <label>轮询间隔（秒）<input id="poll-seconds" type="number" min="5" max="300" value="30" /></label>
@@ -157,7 +184,7 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-step-section="tasks">
         <h2>任务列表</h2>
         <div id="summary">尚未导入文件。</div>
         <div class="table-scroll"><table>
@@ -166,7 +193,7 @@
         </table></div>
       </section>
 
-      <details class="panel log-panel">
+      <details class="panel log-panel" data-step-section="tasks">
         <summary>运行日志 <span>查看执行详情</span></summary>
         <pre id="log"></pre>
       </details>

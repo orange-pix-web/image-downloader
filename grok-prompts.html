@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Grok 图片生成提示词</title><link rel="stylesheet" href="grok-prompts.css"></head>
+<body><main>
+  <header><h1>Grok 图片生成提示词</h1><p>上传参考图与产品图，让 Grok 编写提示词。</p><button id="open-window" class="secondary">在独立窗口打开</button></header>
+  <section>
+    <label>Grok 对话页面<select id="tab"><option value="">请选择已登录的 Grok 页面</option></select></label>
+    <div class="row"><button id="refresh" class="secondary">刷新页面列表</button><button id="check" class="secondary">检查连接</button></div>
+    <p id="connection" role="status">请在同一浏览器中打开 grok.com 普通对话。</p>
+    <details id="diagnostics-wrap" hidden><summary>上传控件诊断（可选中文字复制）</summary><pre id="diagnostics"></pre></details>
+    <div class="grid">
+      <label>产品图（1张）<input id="product" type="file" accept="image/png,image/jpeg,image/webp"></label>
+      <label>参考图（可多选）<input id="references" type="file" accept="image/png,image/jpeg,image/webp" multiple></label>
+    </div>
+    <p id="files">尚未选择图片。</p>
+    <label>生成要求<textarea id="instruction" rows="5">根据参考图的构图、风格、色彩和文案层级，为最后一张产品图编写中文电商生图提示词。保留产品包装、品牌与产品名称，替换参考图中的旧产品与旧品牌。每张参考图对应一段独立提示词，按上传顺序编号。只输出完整提示词，不要生成图片。</textarea></label>
+    <label>每批最多附件数（含产品图）<input id="batch" type="number" min="2" max="20" value="10"></label>
+    <p>参考图先上传，产品图最后上传。参考图较多时分批发送，每批重复附上产品图。</p>
+    <div class="row"><button id="start">上传并生成提示词</button><button id="stop" class="secondary" disabled>停止后续批次</button></div>
+    <p id="status" role="status" aria-live="polite">准备就绪</p>
+  </section>
+  <section><h2>运行日志</h2><pre id="log" role="log" aria-live="polite"></pre></section>
+  <section><h2>生成结果</h2><button id="save-all" class="secondary" disabled>保存全部提示词（Markdown）</button><p>每批可单独保存，也可合并保存全部文字结果。保存时可选择位置。刷新页面会清空未保存结果；Grok 附件文档仍需在原页面下载。</p><div id="results"></div></section>
+</main><script src="grok-prompts.js"></script></body></html>

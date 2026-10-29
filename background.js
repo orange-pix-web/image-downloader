@@ -24,6 +24,32 @@ async function openManagerWindow(targetTabId) {
   return { windowId: created.id, reused: false };
 }
 
+async function openGrokWindow() {
+  const url = chrome.runtime.getURL('grok-prompts.html');
+  const tabs = await chrome.tabs.query({});
+  const existing = tabs.find(tab => tab.url?.startsWith(url) && tab.url?.includes('window=1'));
+  if (existing) {
+    await chrome.windows.update(existing.windowId, { focused: true });
+    await chrome.tabs.update(existing.id, { active: true });
+    return { reused: true };
+  }
+  const window = await chrome.windows.create({ url: `${url}?window=1`, type: 'popup', width: 640, height: 860, focused: true });
+  return { windowId: window.id };
+}
+
+async function openWorkflowWindow() {
+  const url = chrome.runtime.getURL('workflow.html');
+  const tabs = await chrome.tabs.query({});
+  const existing = tabs.find(tab => tab.url === url);
+  if (existing?.id) {
+    await chrome.tabs.update(existing.id, { active: true });
+    if (existing.windowId) await chrome.windows.update(existing.windowId, { focused: true });
+    return { tabId: existing.id };
+  }
+  const tab = await chrome.tabs.create({ url });
+  return { tabId: tab.id };
+}
+
 function normalizedDownloadExtension(item) {
   const mime = String(item.mime || "").toLowerCase();
   if (mime.includes("png")) return "png";
@@ -103,6 +129,11 @@ function cleanName(value, fallback) {
     .replace(/[. ]+$/g, "")
     .slice(0, 60);
   return cleaned || fallback;
+}
+
+function cleanFolder(value, fallback) {
+  const parts = String(value || '').split(/[\\/]+/).map(part => cleanName(part, '')).filter(Boolean);
+  return parts.join('/') || fallback;
 }
 
 function cleanOriginalFilename(value, fallback) {
@@ -188,7 +219,7 @@ chrome.downloads.onChanged.addListener((delta) => {
 });
 
 async function runJob(jobId, images, options) {
-  const folder = cleanName(options.folder, "ChatGPT图片");
+  const folder = cleanFolder(options.folder, "ChatGPT图片");
   const prefix = cleanName(options.prefix, "GPT图片");
   const width = Math.max(3, String(images.length).length);
 
@@ -197,7 +228,8 @@ async function runJob(jobId, images, options) {
   for (let i = 0; i < images.length; i += 1) {
     const ext = detectExtension(images[i].url);
     const number = String(images[i].order || i + 1).padStart(width, "0");
-    const filename = `${folder}/${prefix}_${number}.${ext}`;
+    const filenameBase = cleanName(images[i].filenameBase, `${prefix}_${number}`);
+    const filename = `${folder}/${filenameBase}.${ext}`;
 
     activeJobs.set(jobId, {
       state: "running",
@@ -343,6 +375,16 @@ async function runStreamingLibraryJob(jobId, tabId, action, options = {}) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === 'GPT_WORKFLOW_OPEN') {
+    openWorkflowWindow().then(result => sendResponse({ ok: true, ...result }))
+      .catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+  if (message?.type === 'GROK_OPEN_WINDOW') {
+    openGrokWindow().then(result => sendResponse({ ok: true, ...result }))
+      .catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
   if (message?.type === "GPT_OPEN_MANAGER") {
     const targetTabId = message.tabId || sender.tab?.id;
     openManagerWindow(targetTabId)

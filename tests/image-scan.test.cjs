@@ -34,6 +34,13 @@ test('识别助手生成区的 Blob 和后端图片地址', () => {
   }
   assert.equal(context.isChatGptGeneratedImage(image({ owner: 'assistant' })), false);
 });
+test('识别新版 data-conversation-role 助手消息中的成图', () => {
+  const message = { querySelector: (selector) => selector.includes('assistant') ? {} : null };
+  const img = image({ src: 'blob:new-chatgpt-result' });
+  img.closest = (selector) => selector.includes('data-chatgpt-search-message-ids') ? message : null;
+  assert.equal(context.chatGptImageOwner(img), 'assistant');
+  assert.equal(context.isChatGptGeneratedImage(img), true);
+});
 test('画廊没有旧版按钮时去重主图和缩略图，序号连续', () => {
   const images = ['file-1', 'file-1', 'file-2'].map((id) => image({ gallery: true, src: `https://chatgpt.com/backend-api/estuary/content?id=${id}` }));
   const gallery = {
@@ -44,4 +51,32 @@ test('画廊没有旧版按钮时去重主图和缩略图，序号连续', () =>
   const result = context.getChatGptGeneratedImages();
   assert.equal(result.length, 2);
   assert.deepEqual(Array.from(result, (item) => item.key), ['gallery:gallery-0:1', 'gallery:gallery-0:2']);
+});
+test('新版十图画廊从大图同级侧栏读取全部缩略图', () => {
+  const thumbnails = Array.from({ length: 10 }, (_, index) => {
+    const img = image({ gallery: true, src: `blob:gallery-image-${index + 1}` });
+    img.closest = (selector) => selector.includes('aria-label') ? ({ getAttribute: () => `显示生成的图像 ${index + 1}` }) : (selector.includes('generated-image-gallery') ? {} : null);
+    return { querySelector: () => img };
+  });
+  const scope = { parentElement: body, getAttribute: () => null, querySelectorAll: (selector) => selector.includes('aria-label') ? thumbnails : [] };
+  const gallery = {
+    parentElement: scope, getAttribute: () => null, closest: () => null,
+    querySelectorAll: () => []
+  };
+  context.document.querySelectorAll = (selector) => selector === '[data-testid="generated-image-gallery"]' ? [gallery] : [];
+  const result = context.getChatGptGeneratedImages();
+  assert.equal(result.length, 10);
+  assert.deepEqual(Array.from(result, item => item.key), Array.from({ length: 10 }, (_, index) => `gallery:gallery-0:${index + 1}`));
+});
+test('新版十图画廊允许缩略图位于大图祖先的更高层', () => {
+  const thumbnails = Array.from({ length: 10 }, (_, index) => {
+    const img = image({ src: `blob:nested-gallery-${index + 1}` });
+    img.closest = (selector) => selector.includes('aria-label') ? ({ getAttribute: () => `显示生成的图像 ${index + 1}` }) : null;
+    return { querySelector: () => img };
+  });
+  const outer = { parentElement: body, getAttribute: () => null, querySelectorAll: (selector) => selector.includes('aria-label') ? thumbnails : [] };
+  const inner = { parentElement: outer, getAttribute: () => null, querySelectorAll: () => [] };
+  const gallery = { parentElement: inner, getAttribute: () => null, closest: () => null, querySelectorAll: () => [] };
+  context.document.querySelectorAll = (selector) => selector === '[data-testid="generated-image-gallery"]' ? [gallery] : [];
+  assert.equal(context.getChatGptGeneratedImages().length, 10);
 });

@@ -38,7 +38,9 @@ function chatGptImageOwner(img) {
         node.getAttribute('data-turn') === 'user') return 'user';
   }
   if (img.closest('[data-message-author-role="assistant"], [data-turn="assistant"]')) return 'assistant';
-  const message = img.closest('article, [data-testid^="conversation-turn-"]');
+  const message = img.closest('[data-chatgpt-search-message-ids], [data-chatgpt-search-unit-key], article, [data-testid^="conversation-turn-"]');
+  if (message?.querySelector?.('[data-conversation-role="user"]')) return 'user';
+  if (message?.querySelector?.('[data-conversation-role="assistant"]')) return 'assistant';
   if (message?.querySelector('[data-message-author-role="user"], [data-turn="user"]') &&
       !message.querySelector('[data-message-author-role="assistant"], [data-turn="assistant"]')) return 'user';
   return 'unknown';
@@ -75,14 +77,28 @@ function getChatGptGeneratedImages() {
     const messageId = messageIds?.[0] || `gallery-${galleryIndex}`;
     // ChatGPT 会在不同版本里改变 aria-label，甚至暂时不渲染按钮；
     // 不能因为按钮选择器失效就把整组生成图判定为 0 张。
+    // 当前 ChatGPT 将大图画廊与 1–10 缩略图放在同一个父容器的两个并列区域，
+    // 不能只在 gallery 自身内部查找，否则只能读取当前显示的大图。
+    let galleryScope = gallery;
+    // 逐级向上寻找真正同时包含大图和整列缩略图的画廊容器。ChatGPT 不同版本
+    // 会在二者之间多包一到数层 div，只看直接父级时经常只能得到当前大图。
+    for (let node = gallery; node && node !== document.body; node = node.parentElement) {
+      if (!node.querySelectorAll) continue;
+      galleryScope = node;
+      const count = node.querySelectorAll(
+        '[aria-label^="显示生成的图像"], [aria-label^="Show generated image"]'
+      ).length;
+      if (count > 1) break;
+    }
     const thumbnailButtons = Array.from(
-      gallery.querySelectorAll(
-        'button[aria-label^="显示生成的图像"], button[aria-label^="Show generated image"]'
+      galleryScope.querySelectorAll(
+        '[aria-label^="显示生成的图像"], [aria-label^="Show generated image"]'
       )
     );
     const galleryUrls = new Set();
-    const thumbnailImages = thumbnailButtons.length
-      ? thumbnailButtons.map((button) => button.querySelector('img')).filter(Boolean)
+    const controlledImages = thumbnailButtons.map((button) => button.querySelector?.('img')).filter(Boolean);
+    const thumbnailImages = controlledImages.length
+      ? controlledImages
       : Array.from(gallery.querySelectorAll('img')).filter((img) => {
         const url = img.currentSrc || img.src;
         return Boolean(url && !url.startsWith('data:image/'));
@@ -90,13 +106,15 @@ function getChatGptGeneratedImages() {
 
     for (let buttonIndex = 0; buttonIndex < thumbnailImages.length; buttonIndex += 1) {
       const img = thumbnailImages[buttonIndex];
-      if (!isChatGptGeneratedImage(img)) continue;
+      // 带“显示生成的图像 N”按钮本身就是强依据；缩略图可能位于 gallery 节点之外，
+      // 此时不能再要求 img.closest(gallery) 成立。
+      if (controlledImages.length ? chatGptImageOwner(img) === 'user' : !isChatGptGeneratedImage(img)) continue;
       const url = img?.currentSrc || img?.src;
       if (!url) continue;
       const urlKey = canonicalImageKey(url);
-      if (!thumbnailButtons.length && galleryUrls.has(urlKey)) continue;
+      if (!controlledImages.length && galleryUrls.has(urlKey)) continue;
       galleryUrls.add(urlKey);
-      const button = img.closest('button');
+      const button = img.closest('[aria-label^="显示生成的图像"], [aria-label^="Show generated image"]');
       const label = button?.getAttribute('aria-label') || "";
       const number = Number(label.match(/(\d+)\s*$/)?.[1]) || galleryUrls.size;
       const key = `gallery:${messageId}:${number}`;
@@ -121,6 +139,8 @@ function getChatGptGeneratedImages() {
       '[data-testid="image-generation-result"] img,' +
       '[data-message-author-role="assistant"] img,' +
       '[data-turn="assistant"] img,' +
+      '[data-chatgpt-search-message-ids] img,' +
+      '[data-chatgpt-search-unit-key] img,' +
       'main img[src*="/backend-api/estuary/content"], main img[src*="/backend-api/files/"],' +
       'img[alt*="Generated"], img[alt*="generated"], img[alt*="生成"]'
     )
@@ -134,11 +154,7 @@ function getChatGptGeneratedImages() {
     if (!url) continue;
 
     // 只收集助手生成区域，排除用户自己上传的参考图。
-    const turn = img.closest('[data-message-author-role], [data-turn]');
-    const isUserTurn =
-      turn?.getAttribute("data-message-author-role") === "user" ||
-      turn?.getAttribute("data-turn") === "user";
-    if (isUserTurn) continue;
+    if (chatGptImageOwner(img) === 'user') continue;
 
     // 排除头像和小图标，但保留轮播导航缩略图；未选中的生成结果可能只以约 60px 缩略图存在。
     const renderedWidth = img.getBoundingClientRect().width;
@@ -693,8 +709,6 @@ function mountAutomationPanel() {
   host.openPanel = openManager;
 }
 
-mountAutomationPanel();
-
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -736,13 +750,32 @@ function chatGptPromptEditor() {
 }
 
 function chatGptUploadInput() {
-  const uploads = Array.from(document.querySelectorAll('input[type="file"]'));
+  const uploads = Array.from(document.querySelectorAll('input[type="file"]')).filter(input => input.isConnected && !input.disabled);
+  const editor = chatGptPromptEditor();
+  const root = editor?.closest('form') || editor?.closest('[data-type="unified-composer"]');
+  const local = uploads.filter(input => root?.contains(input));
   return (
-    document.querySelector('#upload-files') ||
+    local.find(input => /image|png|jpe?g|webp/i.test(input.accept || '')) ||
+    local[0] ||
+    uploads.find(input => input.id === 'upload-files') ||
     uploads.find((input) => /image|png|jpe?g|webp/i.test(input.accept || "")) ||
     uploads[0] ||
     null
   );
+}
+
+function chatGptAttachmentCount(editor) {
+  const root = editor?.closest('form') || editor?.closest('[data-type="unified-composer"]');
+  if (!root) return 0;
+  const urls = new Set();
+  for (const img of root.querySelectorAll('img')) {
+    const src = img.currentSrc || img.src || '';
+    if (!src || /avatar|profile|favicon/i.test(src)) continue;
+    if (src.startsWith('blob:') || src.startsWith('data:image/') ||
+        /backend-api|\/files\/|oaiusercontent/i.test(src) ||
+        Math.max(img.naturalWidth || 0, img.naturalHeight || 0) >= 128) urls.add(src);
+  }
+  return urls.size;
 }
 
 async function waitForChatGptComposer() {
@@ -804,8 +837,26 @@ function chatGptGenerating() {
   return Boolean(
     stop ||
     document.querySelector('[data-message-author-role="assistant"] [data-streaming="true"]') ||
-    document.querySelector('[data-message-author-role="assistant"][data-streaming="true"]')
+    document.querySelector('[data-message-author-role="assistant"][data-streaming="true"]') ||
+    document.querySelector('[data-chatgpt-search-message-ids] [data-streaming="true"]') ||
+    document.querySelector('[data-chatgpt-search-unit-key] [data-streaming="true"]')
   );
+}
+
+function chatGptAssistantMessages() {
+  const legacy = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+  const current = Array.from(document.querySelectorAll('[data-conversation-role="assistant"]'))
+    .map(heading => heading.parentElement)
+    .filter(Boolean);
+  return Array.from(new Set([...legacy, ...current]))
+    .filter(node => node.isConnected && node.getClientRects().length)
+    .map((node, index) => ({
+      key: node.getAttribute('data-message-id') || node.dataset.messageId ||
+        node.getAttribute('data-chatgpt-search-message-ids') ||
+        node.getAttribute('data-chatgpt-search-unit-key') || `assistant-${index}`,
+      text: (node.innerText || node.textContent || '').replace(/^ChatGPT\s*说：\s*/i, '').trim()
+    }))
+    .filter(item => item.text);
 }
 
 function chatGptEditorText(editor) {
@@ -892,14 +943,15 @@ async function uploadAndSend(images, prompt) {
     submit = chatGptSubmitButton(editor);
     const composerRoot = editor.closest('form') || editor.closest('[data-type="unified-composer"]') || editor.parentElement;
     const uploading = composerRoot?.querySelector('[role="progressbar"], [aria-busy="true"], [data-testid*="uploading"]');
-    if (chatGptSubmitReady(submit) && !uploading && !chatGptGenerating()) {
+    const attachmentCount = chatGptAttachmentCount(editor);
+    if (chatGptSubmitReady(submit) && attachmentCount >= files.length && !uploading && !chatGptGenerating()) {
       readySince ||= Date.now();
       if (Date.now() - readySince >= 1500) break;
     } else readySince = 0;
     await sleep(500);
   }
   if (!readySince || Date.now() >= readyDeadline || !chatGptSubmitReady(submit)) {
-    throw new Error("等待附件上传或发送按钮就绪超时");
+    throw new Error(`未确认图片附件上传成功（需要 ${files.length} 张，当前识别 ${chatGptAttachmentCount(chatGptPromptEditor())} 张），已停止发送。请检查输入框附件并刷新 ChatGPT 页面后重试`);
   }
   const finalEditor = chatGptPromptEditor();
   if (!finalEditor || !finalEditor.isConnected) {
@@ -908,6 +960,9 @@ async function uploadAndSend(images, prompt) {
   const finalPrompt = normalizedPromptText(chatGptEditorText(finalEditor));
   if (finalPrompt !== expectedPrompt) {
     throw new Error("点击发送前未检测到完整提示词，已阻止只发送图片");
+  }
+  if (chatGptAttachmentCount(finalEditor) < files.length) {
+    throw new Error('点击发送前产品图附件消失，已停止发送；请刷新 ChatGPT 页面后重试');
   }
   submit.click();
 }
@@ -1008,13 +1063,6 @@ async function saveDoubaoImage(key) {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === "GPT_PANEL_OPEN") {
-    mountAutomationPanel();
-    document.querySelector("#gpt-image-automation-panel-host")?.openPanel?.();
-    sendResponse({ ok: true });
-    return;
-  }
-
   if (message?.type === "GPT_IMAGE_SCAN") {
     const libraryImages = getLibraryImages();
     const images = libraryImages.length ? libraryImages : getGeneratedImages();
@@ -1056,15 +1104,32 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message?.type === "GPT_AUTOMATION_STATE") {
     const images = getGeneratedImages();
+    const latestAssistantText = chatGptAssistantMessages().at(-1)?.text || '';
+    const generationError = /something went wrong while generating your image|(?:生成|创建).{0,12}(?:图片|图像).{0,12}(?:失败|出错)|无法生成.{0,8}(?:图片|图像)/i.test(latestAssistantText)
+      ? latestAssistantText : '';
     sendResponse({
       ok: true,
       images,
+      generationError,
       platform: location.hostname === "www.doubao.com" ? "doubao" : "chatgpt",
       generating: location.hostname === "www.doubao.com"
         ? doubaoGenerating()
         : chatGptGenerating()
     });
     return;
+  }
+
+  if (message?.type === "GPT_WORKFLOW_ASSISTANT_STATE") {
+    const messages = chatGptAssistantMessages();
+    sendResponse({ ok: true, generating: chatGptGenerating(), messages, latest: messages.at(-1) || null });
+    return;
+  }
+
+  if (message?.type === "GPT_WORKFLOW_IMAGE_DATA") {
+    pageBlobToDataUrl(message.url)
+      .then(result => sendResponse({ ok: true, ...result }))
+      .catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
   }
 
   if (message?.type === "GPT_AUTOMATION_SEND") {

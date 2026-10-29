@@ -2,7 +2,7 @@ const statusEl = document.querySelector("#status");
 const downloadButton = document.querySelector("#download");
 const rescanButton = document.querySelector("#rescan");
 const clearHistoryButton = document.querySelector("#clear-history");
-const dashboardButton = document.querySelector("#open-dashboard");
+document.querySelector('#open-workflow').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'GPT_WORKFLOW_OPEN' }));
 const folderInput = document.querySelector("#folder");
 const prefixInput = document.querySelector("#prefix");
 const pickerEl = document.querySelector("#picker");
@@ -329,21 +329,6 @@ document.querySelector("#select-range").addEventListener("click", () => {
   const start = Math.max(1, Number(rangeStartEl.value) || 1);
   const end = Math.max(start, Number(rangeEndEl.value) || start);
   selectBy((image) => image.order >= start && image.order <= end);
-});
-dashboardButton.addEventListener("click", async () => {
-  try {
-    const tab = await currentTab();
-    const result = await chrome.runtime.sendMessage({
-      type: "GPT_OPEN_MANAGER",
-      tabId: tab?.id
-    });
-    if (!result?.ok) throw new Error(result?.error || "无法打开任务管理器");
-    window.close();
-  } catch (error) {
-    statusEl.textContent = error?.message?.includes("Receiving end")
-      ? "请刷新 ChatGPT 页面后再打开任务管理器。"
-      : error.message;
-  }
 });
 clearHistoryButton.addEventListener("click", async () => {
   await chrome.runtime.sendMessage({ type: "GPT_IMAGE_CLEAR_HISTORY" });

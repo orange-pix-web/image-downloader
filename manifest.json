@@ -1,10 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "AI 图片顺序下载器",
-  "version": "6.5.2",
-  "description": "支持对话生成图与 ChatGPT 资料库图片的单张、批量、按时间下载和删除。",
+  "name": "AI 商品图工作台",
+  "version": "7.10.0",
+  "description": "支持 ChatGPT 两阶段提示词与生图工作流、Obsidian Vault 同步及图片批量下载。",
   "permissions": ["downloads", "activeTab", "storage", "tabs"],
   "host_permissions": [
+    "https://grok.com/*",
+    "https://www.grok.com/*",
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
     "https://www.doubao.com/*",
@@ -19,6 +21,11 @@
     "service_worker": "background.js"
   },
   "content_scripts": [
+    {
+      "matches": ["https://grok.com/*", "https://www.grok.com/*"],
+      "js": ["grok.js"],
+      "run_at": "document_idle"
+    },
     {
       "matches": [
         "https://chatgpt.com/*",
