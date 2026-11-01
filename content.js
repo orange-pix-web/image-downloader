@@ -829,6 +829,18 @@ function chatGptSubmitReady(button) {
   );
 }
 
+function chatGptSendReadiness(editor, expectedAttachments) {
+  const submit = chatGptSubmitButton(editor);
+  const root = editor.closest('form') || editor.closest('[data-type="unified-composer"]') || editor.parentElement;
+  const visible = node => node.isConnected && node.getClientRects().length > 0;
+  // 通用 aria-busy 可能来自编辑器本身；旧消息的 streaming 标记也可能一直保留。
+  // 发送准备只检查当前输入框的上传进度和真正可用的发送按钮。
+  const uploading = Array.from(root?.querySelectorAll('[role="progressbar"], [data-testid*="uploading"]') || []).some(visible);
+  const attachments = chatGptAttachmentCount(editor);
+  const buttonReady = Boolean(submit && visible(submit) && chatGptSubmitReady(submit));
+  return { submit, attachments, uploading, buttonReady, ready: buttonReady && attachments >= expectedAttachments && !uploading };
+}
+
 function chatGptGenerating() {
   const stop = document.querySelector(
     'button[data-testid="stop-button"], #composer-submit-button[data-testid="stop-button"], ' +
@@ -906,6 +918,16 @@ async function fillChatGptPrompt(editor, prompt) {
 }
 
 async function uploadAndSend(images, prompt) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try { return await uploadAndSendAttempt(images, prompt); }
+    catch (error) {
+      if (!error.safeToRetry || attempt === 3) throw error;
+      await sleep(1500 * attempt);
+    }
+  }
+}
+
+async function uploadAndSendAttempt(images, prompt) {
   if (!images.length) throw new Error("没有收到待上传图片");
   const composer = await waitForChatGptComposer();
   const upload = composer.upload;
@@ -917,8 +939,11 @@ async function uploadAndSend(images, prompt) {
   const files = await Promise.all(images.map((image) => dataUrlToFile(image.dataUrl, image.name, image.type)));
   const transfer = new DataTransfer();
   for (const file of files) transfer.items.add(file);
-  upload.files = transfer.files;
-  upload.dispatchEvent(new Event("change", { bubbles: true }));
+  const reusable = normalizedPromptText(chatGptEditorText(editor)) === normalizedPromptText(prompt) && chatGptAttachmentCount(editor) === files.length;
+  if (!reusable) {
+    upload.files = transfer.files;
+    upload.dispatchEvent(new Event("change", { bubbles: true }));
+  }
 
   // 先写文字再等发送按钮，避免新版空输入框始终禁用发送造成死锁。
   // 等待期间每次重新定位；附件处理触发重绘或清空文字时重新补全提示词。
@@ -926,45 +951,53 @@ async function uploadAndSend(images, prompt) {
   const expectedPrompt = normalizedPromptText(prompt);
   if (!expectedPrompt) throw new Error("提示词内容为空，已阻止发送附件");
   await sleep(1000);
-  let readySince = 0;
+  let lastReadiness = null;
+  let confirmedReady = false;
   const readyDeadline = Date.now() + 120000;
   while (Date.now() < readyDeadline) {
     editor = chatGptPromptEditor();
     if (!editor) {
-      readySince = 0;
       await sleep(250);
       continue;
     }
     if (normalizedPromptText(chatGptEditorText(editor)) !== expectedPrompt) {
-      readySince = 0;
       await fillChatGptPrompt(editor, prompt);
       continue;
     }
-    submit = chatGptSubmitButton(editor);
-    const composerRoot = editor.closest('form') || editor.closest('[data-type="unified-composer"]') || editor.parentElement;
-    const uploading = composerRoot?.querySelector('[role="progressbar"], [aria-busy="true"], [data-testid*="uploading"]');
-    const attachmentCount = chatGptAttachmentCount(editor);
-    if (chatGptSubmitReady(submit) && attachmentCount >= files.length && !uploading && !chatGptGenerating()) {
-      readySince ||= Date.now();
-      if (Date.now() - readySince >= 1500) break;
-    } else readySince = 0;
+    lastReadiness = chatGptSendReadiness(editor, files.length);
+    submit = lastReadiness.submit;
+    if (lastReadiness.ready) {
+      // 完整文字、附件与可用按钮在同次检查中成立即可；避免后台标签页计时节流
+      // 或页面重绘导致连续计时永远归零。点击前仍会再次定位并校验。
+      confirmedReady = true; break;
+    }
     await sleep(500);
   }
-  if (!readySince || Date.now() >= readyDeadline || !chatGptSubmitReady(submit)) {
-    throw new Error(`未确认图片附件上传成功（需要 ${files.length} 张，当前识别 ${chatGptAttachmentCount(chatGptPromptEditor())} 张），已停止发送。请检查输入框附件并刷新 ChatGPT 页面后重试`);
+  if (!confirmedReady) {
+    throw Object.assign(new Error(`发送准备超时：附件 ${lastReadiness?.attachments ?? 0}/${files.length}；上传进度${lastReadiness?.uploading ? '仍在显示' : '已结束'}；发送按钮${lastReadiness?.buttonReady ? '可用' : '不可用或未找到'}。已执行发送前重试，输入框内容保留。`), { safeToRetry: true });
   }
   const finalEditor = chatGptPromptEditor();
   if (!finalEditor || !finalEditor.isConnected) {
-    throw new Error("点击发送前输入框被页面替换，已阻止只发送图片");
+    throw Object.assign(new Error('发送前输入框被页面替换'), { safeToRetry: true });
   }
   const finalPrompt = normalizedPromptText(chatGptEditorText(finalEditor));
   if (finalPrompt !== expectedPrompt) {
-    throw new Error("点击发送前未检测到完整提示词，已阻止只发送图片");
+    throw Object.assign(new Error('发送前提示词发生变化'), { safeToRetry: true });
   }
   if (chatGptAttachmentCount(finalEditor) < files.length) {
     throw new Error('点击发送前产品图附件消失，已停止发送；请刷新 ChatGPT 页面后重试');
   }
-  submit.click();
+  const finalReady = chatGptSendReadiness(finalEditor, files.length);
+  if (!finalReady.ready) throw Object.assign(new Error('发送前网页状态变化，已保留产品图和提示词'), { safeToRetry: true });
+  finalReady.submit.click();
+  const acknowledgementDeadline = Date.now() + 15000;
+  while (Date.now() < acknowledgementDeadline) {
+    await sleep(500);
+    const currentEditor = chatGptPromptEditor();
+    if (currentEditor && !normalizedPromptText(chatGptEditorText(currentEditor)) && chatGptAttachmentCount(currentEditor) === 0) return;
+  }
+  // 点击后结果不明时不自动再次点击，避免同一张图重复生成。
+  throw new Error('已点击发送，但15秒内未确认输入框清空。请检查ChatGPT是否已收到本条，确认后再继续，避免重复发送');
 }
 
 function setTextareaValue(textarea, value) {

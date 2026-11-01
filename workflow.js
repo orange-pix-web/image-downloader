@@ -528,23 +528,24 @@ async function runStageTwo() {
   }
   const groups = [...grouped.values()];
   let failure = null;
-  for (const [groupOffset, items] of groups.entries()) {
+  for (let groupOffset = 0; groupOffset < groups.length; groupOffset += 1) {
+    const items = groups[groupOffset];
     if (state.paused) break;
     items.sort((a, b) => (a.orderInGroup || 1) - (b.orderInGroup || 1));
     const prompts = items.map(item => state.prompts.find(prompt => prompt.id === item.promptId));
     if (prompts.some(prompt => !prompt)) {
       for (const item of items) item.status = '失败：提示词不存在';
-      await saveQueue(); continue;
+      await saveQueue(); state.paused = true; failure = new Error('队列提示词不存在，请补充后继续'); break;
     }
     const firstItem = items[0], firstPrompt = prompts[0];
     const product = state.products.find(x => x.id === firstPrompt.productId);
     const progress = `第 ${groupOffset + 1}/${groups.length} 组 · ${items.length} 张`;
     try {
       setStageTwoButton(`${progress}：准备发送…`);
-      for (const item of items) item.status = '准备整组';
+      for (const item of items) if (item.status !== '完成') item.status = '准备整组';
       await saveQueue();
       let baseline;
-      const recovery = items.every(item => item.stage === 'waiting' && item.tabId === Number(tabId) && Array.isArray(item.baselineKeys));
+      const recovery = items.filter(item => item.status !== '完成').every(item => item.stage === 'waiting' && item.tabId === Number(tabId) && Array.isArray(item.baselineKeys));
       if (recovery) {
         baseline = new Set(firstItem.baselineKeys);
         log(`恢复第 ${firstItem.groupIndex || groupOffset + 1} 组的等待阶段，不会重复发送这一组提示词。`);
@@ -560,13 +561,24 @@ async function runStageTwo() {
         const outgoingPrompt = Core.generationBatchPrompt(prompts, $('#custom-style').value, $('#strip-original-style').checked, includeReferences);
         if (!outgoingPrompt) throw new Error('清理风格后提示词为空，请取消自动清理或补充提示词内容');
         setStageTwoButton(`${progress}：上传产品图${includeReferences ? `、${Math.max(0, assets.length - 1)} 张参考图` : ''}和 ${items.length} 条提示词…`);
-        const sent = await messageTab(tabId, { type: 'GPT_AUTOMATION_SEND', images, prompt: outgoingPrompt }); if (!sent?.ok) throw new Error(sent?.error || '发送失败');
+        let sent;
+        try { sent = await messageTab(tabId, { type: 'GPT_AUTOMATION_SEND', images, prompt: outgoingPrompt }); }
+        catch (error) {
+          // 消息通道断开时可能已发出请求，保留基线，先查结果而不是立即重发。
+          for (const item of items) if (item.status !== '完成') item.stage = 'waiting';
+          throw error;
+        }
+        if (!sent?.ok) {
+          if (/已点击发送/.test(sent?.error || '')) for (const item of items) if (item.status !== '完成') item.stage = 'waiting';
+          throw new Error(sent?.error || '发送失败');
+        }
         for (const item of items) { item.status = '等待画廊'; item.stage = 'waiting'; }
         await saveQueue();
       }
       setStageTwoButton(`${progress}：等待画廊 ${items.length} 张…`);
       const outputs = await waitImages(tabId, baseline, items.length);
       for (const [index, output] of outputs.entries()) {
+        if (items[index].status === '完成') continue;
         setStageTwoButton(`${progress}：下载 ${index + 1}/${outputs.length}…`);
         let dataUrl = null, mime = output.mime || 'image/png';
         const converted = await messageTab(tabId, { type: 'GPT_WORKFLOW_IMAGE_DATA', url: output.url });
@@ -608,9 +620,24 @@ async function runStageTwo() {
     } catch (error) {
       for (const item of items) if (item.status !== '完成') item.status = state.paused ? '已暂停' : `失败：${error.message}`;
       await saveQueue();
-      if (!state.paused) { failure = error; state.paused = true; }
-      log(items[0].status);
-      break;
+      if (state.paused) { log('队列已暂停，未完成任务已保留。'); break; }
+      if (/找不到.*产品图|提示词为空|提示词不存在/.test(error.message)) {
+        failure = error; state.paused = true; log(`需要补充素材：${error.message}`); break;
+      }
+      for (const item of items) if (item.status !== '完成') {
+        item.retryCount = (item.retryCount || 0) + 1;
+        // 网页明确报告生成失败才允许重新提交；超时、下载失败继续读取原请求结果。
+        if (/ChatGPT 本轮生图失败/.test(error.message)) delete item.stage;
+        item.status = `等待自动重试（${item.retryCount}）`;
+      }
+      const attempts = Math.max(...items.map(item => item.retryCount || 0));
+      const waitSeconds = Math.min(60, 10 * attempts);
+      await saveQueue();
+      log(`第 ${firstItem.groupIndex || groupOffset + 1} 组失败：${error.message}。${waitSeconds}秒后自动重试第${attempts}次，已完成任务保留。`);
+      setStageTwoButton(`${waitSeconds}秒后自动重试，可点击暂停`);
+      for (let second = 0; second < waitSeconds && !state.paused; second += 1) await sleep(1000);
+      if (state.paused) break;
+      groupOffset -= 1;
     }
   }
   await loadAll();
