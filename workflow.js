@@ -946,15 +946,17 @@ function setupDiskLibrary() {
       }
       status('正在扫描目录…'); $('#disk-list').replaceChildren();
       const notes = await walk(roots.notes);
-      const images = (await walk(roots.images)).filter(file => /(?:^|\/)产品图\//.test(file.path) && /\.(png|jpe?g|webp)$/i.test(file.path));
+      const imageFiles = await walk(roots.images);
+      const images = imageFiles.filter(file => (roots.images.name === '产品图' || /(?:^|\/)产品图\//.test(file.path)) && /\.(png|jpe?g|webp)$/i.test(file.path));
       const groups = new Map();
-      for (const file of notes.filter(file => /纯净反推\//.test(file.path) && /提示词[^/]*\.(md|markdown|txt)$/i.test(file.path))) {
+      for (const file of notes.filter(file => /(?:^|\/)[^/]*提示词[^/]*\.(md|markdown|txt)$/i.test(file.path))) {
         const key = file.path.slice(0, file.path.lastIndexOf('/'));
         if (!groups.has(key)) groups.set(key, []); groups.get(key).push(file);
       }
       for (const [path, files] of groups) {
         files.sort((a, b) => a.path.localeCompare(b.path, 'zh-CN', { numeric: true }));
-        const product = path.split('/')[0];
+        const parts = path.split('/').filter(Boolean);
+        const product = (parts[0] === 'AI图片工作流' ? parts[1] : parts[0]) || roots.notes.name;
         const row = document.createElement('div'); row.className = 'disk-row';
         const title = document.createElement('strong'); title.textContent = `${path}（${files.length}个提示词文件）`;
         const fileList = document.createElement('div'); fileList.className = 'disk-file-list';
@@ -1020,7 +1022,7 @@ function setupDiskLibrary() {
         row.append(title, fileList, select, use); $('#disk-list').appendChild(row);
       }
       applyFilter();
-      status(`已找到 ${groups.size} 组提示词、${images.length} 张产品图。请确认产品图后生成队列。`);
+      status(`知识库：${roots.notes.name}；附件：${roots.images.name}。已找到 ${groups.size} 组提示词、${images.length} 张产品图。${images.length ? '请确认产品图后生成队列。' : '未找到产品图，请重新关联附件根目录（内含“产品图”文件夹），或直接关联“产品图”目录。'}`);
     } catch (error) { status(`扫描失败：${error.message}`); } finally { button.disabled = false; }
   });
 }
