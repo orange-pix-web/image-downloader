@@ -24,6 +24,12 @@
     return bom + (done ? `已生图${newline}` : '') + body;
   }
 
+  function isPromptLibraryFile(path, content) {
+    if (!/\.(md|markdown|txt)$/i.test(path)) return false;
+    if (/[^/\\]*提示词[^/\\]*\.(md|markdown|txt)$/i.test(path)) return true;
+    return /(?:^|\n)\s*(?:#{1,6}\s*)?【\s*(?:第\s*\d{1,4}\s*张\s*[｜|]\s*)?(?:生图\s*)?提示词\s*\d{1,4}(?:\s*[｜|]\s*[^】\n]*)?\s*】/.test(content);
+  }
+
   function parseNumberedPrompts(text) {
     const source = String(text || "").trim();
     if (!source) return [];
@@ -167,5 +173,5 @@
     return `${frontmatter({ type: "ai-image-prompt", uuid: prompt.id, product_uuid: product.id, batch_uuid: batch.id, number: prompt.number, status: prompt.status || "ready" })}\n# 提示词 ${prompt.number}\n\n产品：[[${productTitle}]]\n\n批次：[[${batchTitle}]]\n\n## 提示词\n\n${prompt.text}\n\n## 关联素材\n\n${images || "暂无"}\n\n## 生成结果\n\n${outputs || "暂无"}\n\n反向链接：[[${batchTitle}]] · [[${productTitle}]]\n`;
   }
 
-  return { uuid, safe, setFileGeneratedStatus, parseNumberedPrompts, renumber, move, batchReferences, groupPromptsByProduct, stripStyleDescriptions, generationAssets, generationPrompt, generationBatchPrompt, vaultPaths, promptMarkdown };
+  return { uuid, safe, isPromptLibraryFile, setFileGeneratedStatus, parseNumberedPrompts, renumber, move, batchReferences, groupPromptsByProduct, stripStyleDescriptions, generationAssets, generationPrompt, generationBatchPrompt, vaultPaths, promptMarkdown };
 });

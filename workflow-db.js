@@ -54,5 +54,39 @@
       request.onerror = () => reject(request.error);
     });
   }
-  root.WorkflowDB = { open, put, get, all, remove, STORES };
+  async function savePromptBatch(batch, rows, source) {
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(['prompts', 'batches', 'settings'], 'readwrite');
+      const prompts = transaction.objectStore('prompts'), settings = transaction.objectStore('settings');
+      let added = 0, duplicates = 0;
+      const fail = message => { transaction.abort(); reject(new Error(message)); };
+      const receipt = settings.get(source.id);
+      receipt.onsuccess = () => {
+        if (receipt.result && receipt.result.batchId !== batch.id) { fail('此网页回复已被其他批次读取，已阻止重复归属'); return; }
+        const batchRequest = transaction.objectStore('batches').get(batch.id);
+        batchRequest.onsuccess = () => {
+        if (batchRequest.result?.replySource && batchRequest.result.replySource.id !== source.id) { fail('此批次已保存另一条回复，已阻止覆盖原来源'); return; }
+        const request = prompts.getAll();
+        request.onsuccess = () => {
+          const existing = request.result;
+          for (const row of rows) {
+            const previous = existing.find(item => item.batchId === batch.id && item.number === row.number);
+            if (previous) continue; // 保留已保存的 ID、人工编辑及关联，仅补齐缺失条目。
+            const normalize = text => String(text || '').normalize('NFKC').replace(/\s+/g, '');
+            const duplicate = existing.find(item => normalize(item.text) === normalize(row.text));
+            if (duplicate) { row.duplicateOf = duplicate.id; row.status = 'needs-review'; duplicates++; }
+            prompts.put(row); existing.push(row); added++;
+          }
+          settings.put({ ...source, batchId: batch.id, readAt: Date.now() });
+          transaction.objectStore('batches').put({ ...batch, status: 'prompts-ready', replySource: source, updatedAt: Date.now() });
+        };
+        };
+      };
+      transaction.oncomplete = () => resolve({ added, duplicates });
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error('批次保存已取消，未写入部分数据'));
+    });
+  }
+  root.WorkflowDB = { open, put, get, all, remove, savePromptBatch, STORES };
 })(globalThis);

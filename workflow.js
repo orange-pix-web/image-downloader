@@ -25,6 +25,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const fileDataUrl = file => new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = () => reject(r.error); r.readAsDataURL(file); });
 const nowName = () => new Date().toLocaleString('zh-CN', { hour12: false }).replace(/[/:]/g, '-');
 const chatUrl = url => /^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(url || '');
+const imageUrl = url => chatUrl(url) || /^https:\/\/www\.doubao\.com\//.test(url || '');
 const containsProcessWords = text => /(参考图|样例图|视觉样例|复刻|复制参考|模仿参考|替换(?:为|成|产品)|原产品|当前产品名称|九宫格|宫格图|拼图|分镜|联系表|多画面|多版式并排)/.test(String(text || ''));
 const includeGenerationReferences = () => document.querySelector('input[name="generation-image-mode"]:checked')?.value === 'linked';
 
@@ -40,14 +41,14 @@ async function loadAll() {
 }
 
 async function refreshTabs(select) {
-  const tabs = (await chrome.tabs.query({})).filter(tab => chatUrl(tab.url)).sort((a, b) => {
+  const tabs = (await chrome.tabs.query({})).filter(tab => imageUrl(tab.url)).sort((a, b) => {
     const wanted = select.id === 'image-tab' ? /(生图|生成.*图|图片)/ : /(提示词|prompt)/i;
     const score = tab => wanted.test(tab.title || '') ? 1 : 0;
     return score(b) - score(a) || (b.lastAccessed || 0) - (a.lastAccessed || 0);
   });
   const old = select.value;
-  select.innerHTML = '<option value="">请选择已登录的 ChatGPT 标签页</option>' + tabs.map(tab =>
-    `<option value="${tab.id}">${escapeHtml(tab.title || 'ChatGPT')} · ID ${tab.id}</option>`).join('');
+  select.innerHTML = '<option value="">请选择已登录的 ChatGPT 或豆包标签页</option>' + tabs.map(tab =>
+    `<option value="${tab.id}">[${chatUrl(tab.url) ? 'ChatGPT' : '豆包'}] ${escapeHtml(tab.title || '对话页面')} · ID ${tab.id}</option>`).join('');
   if (tabs.some(tab => String(tab.id) === old)) select.value = old;
   else if (tabs.length) select.value = String(tabs[0].id);
   if (select.value) {
@@ -57,14 +58,23 @@ async function refreshTabs(select) {
 }
 function escapeHtml(value) { const div = document.createElement('div'); div.textContent = value; return div.innerHTML; }
 async function messageTab(tabId, message) {
-  if (!tabId) throw new Error('请先选择目标 ChatGPT 标签页');
+  if (!tabId) throw new Error('请先选择目标标签页');
   try { return await chrome.tabs.sendMessage(Number(tabId), message); }
-  catch { throw new Error(`无法连接标签页 ID ${tabId}，请刷新该 ChatGPT 页面后重试`); }
+  catch { throw new Error(`无法连接标签页 ID ${tabId}，请刷新该对话页面后重试`); }
 }
 
 function buildPromptBatchPlan() {
+  if ($('#prompt-mode')?.value === 'single-image') {
+    const files = [...$('#reverse-images').files].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true }));
+    if (!files.length) throw new Error('请选择需要逐张反推的图片');
+    const batches = files.map((file, index) => ({ index, productFiles: [file], references: [], expected: 1, numberStart: index + 1, numberEnd: index + 1 }));
+    state.stageOnePlan = { mode: 'single-image', productFiles: [files[0]], referenceFiles: [], batches };
+    $('#prompt-batch-preview').innerHTML = '<p>按文件名自然排序，每次只上传下列一张图片；保存本张提示词后再发送下一张。</p>' + batches.map(batch => `<div class="batch-row"><strong>第 ${batch.index + 1} 张</strong><span>${escapeHtml(batch.productFiles[0].name)}</span><span>提示词 ${batch.numberStart}</span></div>`).join('');
+    log(`已生成逐张反推任务：${files.length} 张图片，每次上传 1 张。`);
+    return state.stageOnePlan;
+  }
   const productFiles = [...$('#product-images').files];
-  const referenceFiles = [...$('#reference-images').files];
+  const referenceFiles = [...$('#reference-images').files].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true }));
   if (productFiles.length !== 1) throw new Error('每个任务必须且只能选择 1 张产品图');
   const groups = Core.batchReferences(referenceFiles, $('#reference-batch-size').value);
   let nextNumber = 1;
@@ -75,7 +85,7 @@ function buildPromptBatchPlan() {
     return batch;
   });
   state.stageOnePlan = { productFiles, referenceFiles, batches };
-  $('#prompt-batch-preview').innerHTML = batches.map(batch => `<div class="batch-row"><strong>第 ${batch.index + 1} 批</strong><span>${batch.references.length ? batch.references.map(file => escapeHtml(file.name)).join('、') : '无参考图，仅使用产品图'}</span><span>提示词 ${batch.numberStart}–${batch.numberEnd}</span></div>`).join('');
+  $('#prompt-batch-preview').innerHTML = '<p>上传顺序：图1始终为产品图；参考图按文件名自然排序。以下编号为实际发送清单。</p>' + batches.map(batch => `<div class="batch-row"><strong>第 ${batch.index + 1} 批</strong><span>图1：${escapeHtml(productFiles[0].name)}（产品图）<br>${batch.references.map((file, index) => `图${index + 2}：${escapeHtml(file.name)} → 提示词${String(batch.numberStart + index).padStart(2, '0')}`).join('<br>') || '无参考图，仅使用产品图'}</span><span>提示词 ${batch.numberStart}–${batch.numberEnd}</span></div>`).join('');
   log(`已生成 ${batches.length} 个提示词批次，共计划生成 ${nextNumber - 1} 条提示词。`);
   return state.stageOnePlan;
 }
@@ -84,14 +94,18 @@ async function saveBatchAssets(product, batch, productFiles, referenceFiles) {
   const assets = [];
   for (const [kind, files] of [['product', productFiles], ['reference', referenceFiles]]) {
     for (const file of files) {
-      const asset = { id: Core.uuid(), productId: product.id, batchId: batch.id, kind, fileName: file.name, mime: file.type, blob: file, createdAt: Date.now() };
+      const asset = { id: Core.uuid(), productId: product.id, batchId: batch.id, kind, uploadOrder: assets.length, fileName: file.name, mime: file.type, blob: file, createdAt: Date.now() };
       assets.push(asset); await DB.put('assets', asset);
     }
   }
   return assets;
 }
+function orderedPromptAssets(assets) {
+  if (assets.some(asset => !Number.isInteger(asset.uploadOrder))) throw new Error('旧任务缺少可靠的图片顺序记录，请重新选择素材建立批次，避免参考图错配');
+  return [...assets].sort((a, b) => a.uploadOrder - b.uploadOrder);
+}
 
-async function waitForPromptReply(tabId, baseline) {
+async function waitForPromptReply(tabId, baseline, batch) {
   const deadline = Date.now() + 30 * 60 * 1000;
   let response = null, stable = 0, previous = '', lastDiagnostic = '';
   while (Date.now() < deadline) {
@@ -99,67 +113,105 @@ async function waitForPromptReply(tabId, baseline) {
     const current = await messageTab(tabId, { type: 'GPT_WORKFLOW_ASSISTANT_STATE' });
     const messages = current.messages || [];
     const latest = current.latest || messages.at(-1);
-    const changed = latest?.text && (
-      messages.length > baseline.count ||
-      latest.key !== baseline.latestKey ||
-      latest.text !== baseline.latestText
-    );
-    const diagnostic = `消息 ${messages.length} 条 · 最新回复 ${latest?.text?.length || 0} 字 · ${current.generating ? '生成中' : '已停止'} · ${changed ? '检测到新回复' : '等待新回复'}`;
+    const changed = latest?.text && (latest.key !== baseline.latestKey || latest.text !== baseline.latestText);
+    const parsed = Core.parseNumberedPrompts(latest?.text || '');
+    const matchesBatch = Boolean(batch && parsed.length === batch.expectedPrompts && parsed.every((prompt, index) => Number(prompt.number) === Number(batch.numberStart) + index));
+    const diagnostic = `第 ${(batch?.batchIndex || 0) + 1} 批 · 目标 ${batch?.numberStart}–${batch?.numberEnd} · 已识别 ${parsed.filter(prompt => Number(prompt.number) >= batch?.numberStart && Number(prompt.number) <= batch?.numberEnd).length}/${batch?.expectedPrompts} 条 · 回复 ${latest?.text?.length || 0} 字 · ${current.generating ? '网页生成中' : '等待完整回复稳定'} · ${changed ? matchesBatch ? '本批编号匹配' : '回复编号尚未匹配本批' : '等待本批新回复'}`;
     if (diagnostic !== lastDiagnostic) {
       lastDiagnostic = diagnostic;
       log(diagnostic);
+      if (batch?.id) {
+        const stored = await DB.get('batches', batch.id);
+        await DB.put('batches', { ...stored, progressText: diagnostic, lastReplyKey: latest?.key, lastReplyLength: latest?.text?.length || 0, updatedAt: Date.now() });
+      }
     }
-    if (changed && !current.generating) {
+    if (changed && matchesBatch && !current.generating) {
       stable = latest.text === previous ? stable + 1 : 0; previous = latest.text;
-      if (stable >= 1) { response = latest.text; break; }
-    } else if (current.generating) {
-      stable = 0;
+      if (stable >= 4) { batch.acceptedReply = { platform: current.platform, conversationUrl: current.conversationUrl, latest: { key: latest.key } }; response = latest.text; break; }
+    } else {
+      stable = 0; previous = '';
     }
   }
   return response;
 }
 
-async function runStageOne() {
+async function runStageOne(resume = false) {
   const tabId = $('#prompt-tab').value;
-  if (!tabId) throw new Error('请选择 ChatGPT 提示词标签页');
-  const plan = buildPromptBatchPlan();
+  if (!tabId) throw new Error('请选择 ChatGPT 或豆包提示词标签页');
+  const saved = resume ? await DB.get('settings', 'prompt-run') : null;
+  const previousRun = await DB.get('settings', 'prompt-run');
+  if (!resume && previousRun && !previousRun.complete) throw new Error('旧的未完成任务仍在占用运行入口。请到“生成提示词”顶部继续旧任务；若旧任务无法恢复，点击“结束旧任务，允许新建”，然后重新开始。已保存提示词不会删除。');
+  const plan = saved?.plan || buildPromptBatchPlan();
   const taskName = $('#batch-name').value.trim() || nowName();
-  const product = { id: Core.uuid(), name: $('#product-name').value.trim() || plan.productFiles[0].name.replace(/\.[^.]+$/, ''), createdAt: Date.now() };
+  const product = saved?.product || { id: Core.uuid(), name: $('#product-name').value.trim() || plan.productFiles[0].name.replace(/\.[^.]+$/, ''), createdAt: Date.now() };
   await DB.put('products', product);
+  if (!saved) {
+    for (const item of plan.batches) {
+      item.batchId = Core.uuid();
+      await DB.put('batches', { id: item.batchId, productId: product.id, name: `${taskName}-第${item.index + 1}批`, batchIndex: item.index, expectedPrompts: item.expected, numberStart: item.numberStart, numberEnd: item.numberEnd, status: 'queued-prompts', promptTabId: Number(tabId), createdAt: Date.now() });
+      await saveBatchAssets(product, { id: item.batchId }, item.productFiles || plan.productFiles, item.references);
+    }
+    await DB.put('settings', { id: 'prompt-run', product, plan, instruction: $('#prompt-instruction').value.trim(), complete: false });
+  }
   let savedCount = 0;
   const basePosition = state.prompts.reduce((max, prompt) => Math.max(max, Number(prompt.position) || 0), -1) + 1;
   for (const item of plan.batches) {
     setStageOneButton(`第 ${item.index + 1}/${plan.batches.length} 批：准备发送…`);
-    const batch = { id: Core.uuid(), productId: product.id, name: `${taskName}-第${item.index + 1}批`, groupName: taskName, batchIndex: item.index, expectedPrompts: item.expected, numberStart: item.numberStart, numberEnd: item.numberEnd, status: 'sending-prompts', promptTabId: Number(tabId), createdAt: Date.now() };
-    await DB.put('batches', batch);
-    const assets = await saveBatchAssets(product, batch, plan.productFiles, item.references);
+    let batch = await DB.get('batches', item.batchId);
+    if (batch.status === 'prompts-ready') continue;
+    const assets = orderedPromptAssets(await DB.all('assets', 'batchId', batch.id));
     const before = await messageTab(tabId, { type: 'GPT_WORKFLOW_ASSISTANT_STATE' });
+    if (batch.conversationUrl && before.conversationUrl !== batch.conversationUrl) throw new Error('请选择该批次原来的对话页面，当前对话不匹配');
     const beforeMessages = before.messages || [];
     const beforeLatest = before.latest || beforeMessages.at(-1) || {};
-    const baseline = { count: beforeMessages.length, latestKey: beforeLatest.key || '', latestText: beforeLatest.text || '' };
-    const images = await Promise.all(assets.map(async asset => ({ dataUrl: await fileDataUrl(asset.blob), name: asset.fileName, type: asset.mime })));
-    const numbering = `本批只有 1 张产品图，共有 ${item.references.length} 张视觉样例。请为${item.references.length ? '每张视觉样例分别' : '产品图'}生成 1 套独立提示词，共 ${item.expected} 套；${item.references.length === 10 ? '即 10 张视觉样例对应 10 套提示词。' : ''}每套提示词未来只生成 1 张完整的 1:1 正方形成图。标题必须依次使用【生图提示词${String(item.numberStart).padStart(2, '0')}】到【生图提示词${String(item.numberEnd).padStart(2, '0')}】，不要从 1 重新编号。10 套提示词是 10 个独立文字段落，绝不能写成九宫格、宫格图、拼图、分镜、联系表、多画面、多版式并排或把多个方案合成在一张图中。最终提示词中严禁出现“参考图”“样例图”“视觉样例”“复刻”“复制”“模仿”“替换”“原产品”“当前产品名称”等过程性措辞；必须改写为生图模型可直接执行的画面描述，并写出实际产品名称。`;
-    const sent = await messageTab(tabId, { type: 'GPT_AUTOMATION_SEND', images, prompt: `${$('#prompt-instruction').value.trim()}\n\n${numbering}` });
+    const baseline = batch.baseline || { count: beforeMessages.length, latestKey: beforeLatest.key || '', latestText: beforeLatest.text || '' };
+    const images = await Promise.all(assets.map(async (asset, index) => ({ dataUrl: await fileDataUrl(asset.blob), name: `图${String(index + 1).padStart(2, '0')}_${asset.fileName}`, type: asset.mime })));
+    const imageManifest = assets.map((asset, index) => `图${index + 1}：${asset.fileName}；${plan.mode === 'single-image' ? `本次唯一待反推图片，对应【生图提示词${String(item.numberStart).padStart(2, '0')}】` : asset.kind === 'product' ? '唯一产品图，不是参考图' : `对应【生图提示词${String(item.numberStart + index - 1).padStart(2, '0')}】`}`).join('\n');
+    const numbering = plan.mode === 'single-image' ? `本次是逐张图片反推任务，只上传了 1 张图片（${assets[0]?.fileName}）。只分析本次附件，不能使用历史消息中的图片或产品信息。将本张图片的主体、构图、色彩、光线、材质及文字布局写为一条可直接生成图片的完整提示词，不要生成图片。忽略模板中多张图、产品替换及固定产品名的要求。只输出一条，标题必须为【生图提示词${String(item.numberStart).padStart(2, '0')}】，不要重新编号，不要输出其他图片的提示词。` : `本批只有 1 张产品图，共有 ${item.references.length} 张视觉样例。请为${item.references.length ? '每张视觉样例分别' : '产品图'}生成 1 套独立提示词，共 ${item.expected} 套；${item.references.length === 10 ? '即 10 张视觉样例对应 10 套提示词。' : ''}每套提示词未来只生成 1 张完整的 1:1 正方形成图。标题必须依次使用【生图提示词${String(item.numberStart).padStart(2, '0')}】到【生图提示词${String(item.numberEnd).padStart(2, '0')}】，不要从 1 重新编号。10 套提示词是 10 个独立文字段落，绝不能写成九宫格、宫格图、拼图、分镜、联系表、多画面、多版式并排或把多个方案合成在一张图中。最终提示词中严禁出现“参考图”“样例图”“视觉样例”“复刻”“复制”“模仿”“替换”“原产品”“当前产品名称”等过程性措辞；必须改写为生图模型可直接执行的画面描述，并写出实际产品名称。`;
+    if (batch.status !== 'sending-prompts') {
+    batch = { ...batch, status: 'sending-prompts', promptTabId: Number(tabId), conversationUrl: before.conversationUrl, baseline };
+    await DB.put('batches', batch);
+    const sent = await messageTab(tabId, { type: 'GPT_AUTOMATION_SEND', images, prompt: `${saved?.instruction || $('#prompt-instruction').value.trim()}\n\n本批附件对应关系（以此清单为准，不沿用模板中的固定图片数量或产品名）：\n${imageManifest}\n\n${numbering}` });
     if (!sent?.ok) throw new Error(sent?.error || `第 ${item.index + 1} 批发送失败`);
+    }
     log(`第 ${item.index + 1}/${plan.batches.length} 批已发送，等待提示词 ${item.numberStart}–${item.numberEnd}。`);
     setStageOneButton(`第 ${item.index + 1}/${plan.batches.length} 批：等待回复…`);
-    const response = await waitForPromptReply(tabId, baseline);
+    const response = await waitForPromptReply(tabId, baseline, batch);
     if (!response) throw new Error(`等待第 ${item.index + 1} 批提示词超时；已保存的批次不会丢失`);
+    await DB.put('batches', { ...batch, assistantResponse: response, updatedAt: Date.now() });
     const parsed = Core.parseNumberedPrompts(response);
     setStageOneButton(`第 ${item.index + 1}/${plan.batches.length} 批：保存 ${parsed.length} 条…`);
     if (parsed.length !== item.expected) throw new Error(`第 ${item.index + 1} 批应返回 ${item.expected} 条，实际识别到 ${parsed.length} 条；已停止后续批次，避免编号错位`);
     const invalidIndexes = parsed.map((prompt, index) => containsProcessWords(prompt.text) ? index + 1 : 0).filter(Boolean);
     if (invalidIndexes.length) log(`第 ${item.index + 1} 批的第 ${invalidIndexes.join('、')} 条仍有过程性措辞，已保存并标记“需检查”，不会阻塞下一批。`);
-    const productAssetIds = assets.filter(asset => asset.kind === 'product').map(asset => asset.id);
-    const referenceAssets = assets.filter(asset => asset.kind === 'reference');
-    for (const [index, prompt] of parsed.entries()) await DB.put('prompts', {
-      id: Core.uuid(), productId: product.id, batchId: batch.id,
-      assetIds: [...productAssetIds, ...(referenceAssets[index] ? [referenceAssets[index].id] : [])],
-      number: String(item.numberStart + index).padStart(2, '0'), text: prompt.text, position: basePosition + savedCount++, status: containsProcessWords(prompt.text) ? 'needs-review' : 'ready', createdAt: Date.now(), updatedAt: Date.now()
-    });
-    await DB.put('batches', { ...batch, status: 'prompts-ready', assistantResponse: response, updatedAt: Date.now() });
+    const result = await saveAcceptedPromptBatch(batch, parsed, assets, response, batch.acceptedReply);
+    savedCount += result.added;
+
   }
+  const completedRun = await DB.get('settings', 'prompt-run');
+  await DB.put('settings', { ...completedRun, complete: true });
   await loadAll(); showView('library'); log(`提示词生成完成：${plan.batches.length} 个批次，共保存 ${savedCount} 条，编号已连续校正。`);
+}
+
+async function saveAcceptedPromptBatch(batch, parsed, assets, response, reply) {
+  if (!reply?.conversationUrl || !reply?.latest?.key) throw new Error('缺少网页回复来源，请刷新原对话页面后重新读取，避免重复保存');
+  if (batch.conversationUrl && batch.conversationUrl !== reply.conversationUrl) throw new Error('当前对话与任务原对话不一致，已停止读取');
+  const bytes = new TextEncoder().encode(response.normalize('NFKC').replace(/\s+/g, ''));
+  const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), byte => byte.toString(16).padStart(2, '0')).join('');
+  const messageKey = /^(doubao-)?assistant-\d+$/.test(reply.latest.key) ? `content:${hash}` : reply.latest.key;
+  const source = { id: `prompt-receipt:${reply.platform}:${reply.conversationUrl}:${messageKey}`, platform: reply.platform, conversationUrl: reply.conversationUrl, messageKey, contentHash: hash };
+  const existing = await DB.all('prompts');
+  const position = existing.reduce((max, prompt) => Math.max(max, Number(prompt.position) || 0), -1) + 1;
+  const products = assets.filter(asset => asset.kind === 'product'), references = assets.filter(asset => asset.kind === 'reference');
+  const rows = parsed.map((prompt, index) => ({
+    id: `prompt:${batch.id}:${String(Number(batch.numberStart) + index).padStart(2, '0')}`,
+    productId: batch.productId, batchId: batch.id, number: String(Number(batch.numberStart) + index).padStart(2, '0'),
+    text: prompt.text, assetIds: [...products.map(asset => asset.id), ...(references[index] ? [references[index].id] : [])],
+    position: position + index, status: containsProcessWords(prompt.text) ? 'needs-review' : 'ready', sourceReplyId: source.id, createdAt: Date.now(), updatedAt: Date.now()
+  }));
+  const result = await DB.savePromptBatch({ ...batch, acceptedReply: reply, conversationUrl: reply.conversationUrl, assistantResponse: response }, rows, source);
+  log(`第 ${batch.batchIndex + 1} 批保存：新增 ${result.added} 条，已有条目保留，内容重复 ${result.duplicates} 条（标记需检查）。来源消息：${messageKey}`);
+  return result;
 }
 
 async function importLocalPrompts() {
@@ -240,7 +292,7 @@ function renderPrompts() {
     const product = state.products.find(x => x.id === productId);
     const cards = prompts.map(prompt => {
       const reference = (prompt.assetIds || []).map(id => state.assets.find(asset => asset.id === id)).find(asset => asset?.kind === 'reference');
-      return `<article class="prompt-card${state.selectedPromptIds.has(prompt.id) ? ' selected' : ''}" data-id="${prompt.id}"><label class="prompt-select" title="选择这条提示词"><input class="prompt-check" type="checkbox" ${state.selectedPromptIds.has(prompt.id) ? 'checked' : ''}><span>选择</span></label><div class="prompt-main"><div class="prompt-card-head"><span class="drag" title="拖动卡片调整本产品内顺序">☰</span><label class="prompt-number-field">编号<input class="prompt-number" value="${escapeHtml(prompt.number)}"></label><span class="prompt-state">${prompt.status === 'needs-review' ? '<span class="review-badge">需检查</span>' : ''}</span><button class="secondary remove-prompt">删除</button></div><textarea class="prompt-text" aria-label="提示词 ${escapeHtml(prompt.number)}">${escapeHtml(prompt.text)}</textarea><div class="prompt-linked-asset" title="${escapeHtml(reference?.fileName || '没有关联参考图')}">${reference ? `关联参考图：${escapeHtml(reference.fileName)}` : '未关联参考图'}</div></div></article>`;
+      return `<article class="prompt-card${state.selectedPromptIds.has(prompt.id) ? ' selected' : ''}" data-id="${prompt.id}"><label class="prompt-select" title="选择这条提示词"><input class="prompt-check" type="checkbox" ${state.selectedPromptIds.has(prompt.id) ? 'checked' : ''}><span>选择</span></label><div class="prompt-main"><div class="prompt-card-head"><span class="drag" title="拖动卡片调整本产品内顺序">☰</span><label class="prompt-number-field">编号<input class="prompt-number" value="${escapeHtml(prompt.number)}"></label><span class="prompt-state">${prompt.status === 'needs-review' ? '<span class="review-badge">需检查</span>' : ''}</span><button class="secondary remove-prompt">删除</button></div>${prompt.duplicateOf ? '<p class="review-badge">检测到相同正文，请核对关联参考图</p>' : ''}<textarea class="prompt-text" aria-label="提示词 ${escapeHtml(prompt.number)}">${escapeHtml(prompt.text)}</textarea><div class="prompt-linked-asset" title="${escapeHtml(reference?.fileName || '没有关联参考图')}">${reference ? `关联参考图：${escapeHtml(reference.fileName)}` : '未关联参考图'}</div></div></article>`;
     }).join('');
     return `<section class="product-prompt-group" data-product-id="${escapeHtml(productId)}"><header class="product-prompt-heading"><div><span class="eyebrow">产品提示词</span><h3>${escapeHtml(product?.name || '未知产品')}</h3></div><div class="product-prompt-actions"><span>${prompts.length} 条</span><button type="button" class="secondary select-product-prompts">选择本产品</button></div></header><div class="prompt-grid">${cards}</div></section>`;
   }).join('') || '<p>还没有提示词。请先完成第一阶段。</p>';
@@ -384,28 +436,19 @@ async function saveSelectedPromptsLocally() {
   }
 }
 
-async function recoverPendingPromptBatches() {
+async function recoverPendingPromptBatches(allowLegacy = false) {
   const pending = state.batches.filter(batch => batch.status === 'sending-prompts' && batch.expectedPrompts && batch.promptTabId);
   for (const batch of pending) {
-    if (state.prompts.some(prompt => prompt.batchId === batch.id)) continue;
     try {
       const current = await messageTab(batch.promptTabId, { type: 'GPT_WORKFLOW_ASSISTANT_STATE' });
+      if (current.generating || !batch.baseline && !allowLegacy || batch.baseline && current.latest?.key === batch.baseline.latestKey && current.latest?.text === batch.baseline.latestText) continue;
       const parsed = Core.parseNumberedPrompts(current.latest?.text || '');
       const firstNumber = Number(parsed[0]?.number);
       const lastNumber = Number(parsed.at(-1)?.number);
-      if (parsed.length !== batch.expectedPrompts || firstNumber !== Number(batch.numberStart) || lastNumber !== Number(batch.numberEnd)) continue;
-      const assets = await DB.all('assets', 'batchId', batch.id);
-      const productAssetIds = assets.filter(asset => asset.kind === 'product').map(asset => asset.id);
-      const references = assets.filter(asset => asset.kind === 'reference');
-      const basePosition = state.prompts.reduce((max, prompt) => Math.max(max, Number(prompt.position) || 0), -1) + 1;
-      for (const [index, prompt] of parsed.entries()) await DB.put('prompts', {
-        id: Core.uuid(), productId: batch.productId, batchId: batch.id,
-        assetIds: [...productAssetIds, ...(references[index] ? [references[index].id] : [])],
-        number: String(batch.numberStart + index).padStart(2, '0'), text: prompt.text,
-        position: basePosition + index, status: 'ready', createdAt: Date.now(), updatedAt: Date.now()
-      });
-      await DB.put('batches', { ...batch, status: 'prompts-ready', assistantResponse: current.latest.text, recoveredAt: Date.now(), updatedAt: Date.now() });
-      log(`已从 ChatGPT 恢复第 ${batch.batchIndex + 1} 批并保存 ${parsed.length} 条提示词。刷新前尚未发送的后续批次需要重新选择对应参考图。`);
+      if (parsed.length !== batch.expectedPrompts || firstNumber !== Number(batch.numberStart) || lastNumber !== Number(batch.numberEnd) || !parsed.every((prompt, index) => Number(prompt.number) === Number(batch.numberStart) + index)) continue;
+      const assets = orderedPromptAssets(await DB.all('assets', 'batchId', batch.id));
+      await saveAcceptedPromptBatch(batch, parsed, assets, current.latest.text, current);
+      log(`已从对话页面恢复第 ${batch.batchIndex + 1} 批并保存 ${parsed.length} 条提示词。可在“生成提示词”中继续剩余批次。`);
       await loadAll();
     } catch (error) {
       log(`检查未完成批次失败：${error.message}`);
@@ -456,11 +499,11 @@ async function waitImages(tabId, baseline, expected) {
     const current = await messageTab(tabId, { type: 'GPT_AUTOMATION_STATE' });
     const fresh = (current.images || []).filter(x => !baseline.has(x.key));
     if (current.generationError && fresh.length < expected) {
-      throw new Error(`ChatGPT 本轮生图失败：${current.generationError}`);
+      throw new Error(`AI 本轮生图失败：${current.generationError}`);
     }
     if (fresh.length !== lastCount) {
       lastCount = fresh.length;
-      log(`已识别 ${Math.min(fresh.length, expected)}/${expected} 张本轮成图${current.generating ? '，ChatGPT 仍在生成' : ''}。`);
+      log(`已识别 ${Math.min(fresh.length, expected)}/${expected} 张本轮成图${current.generating ? '，AI 仍在生成' : ''}。`);
     }
     const next = fresh.map(x => x.key).join('|');
     stable = !current.generating && fresh.length >= expected && next === signature ? stable + 1 : 0; signature = next;
@@ -488,7 +531,7 @@ async function waitDownload(jobId) {
 }
 async function sendNextGroupOnly() {
   const tabId = $('#image-tab').value;
-  if (!tabId) throw new Error('请先选择当前可用的 ChatGPT 生图标签页');
+  if (!tabId) throw new Error('请先选择当前可用的 ChatGPT 或豆包生图标签页');
   const candidates = state.queue.filter(item => item.status !== '完成' && item.stage !== 'manual-sent');
   if (!candidates.length) throw new Error('没有尚未发送的任务；如需重发，请先点“重置未完成任务”');
   const first = candidates[0];
@@ -516,7 +559,7 @@ async function sendNextGroupOnly() {
 }
 async function runStageTwo() {
   const tabId = $('#image-tab').value;
-  if (!tabId) throw new Error('请选择独立 ChatGPT 生图标签页');
+  if (!tabId) throw new Error('请选择独立 ChatGPT 或豆包生图标签页');
   state.paused = false;
   const runnable = state.queue.filter(item => item.status !== '完成' && item.stage !== 'manual-sent');
   if (!runnable.length) throw new Error('队列中没有待执行的提示词');
@@ -585,7 +628,7 @@ async function runStageTwo() {
         if (converted?.ok) {
           dataUrl = converted.dataUrl; mime = converted.mime || mime;
         } else if (output.downloadMethod === 'page-blob' || output.url?.startsWith('blob:')) {
-          throw new Error(converted?.error || '无法读取 ChatGPT 页面成图');
+          throw new Error(converted?.error || '无法读取页面成图');
         }
         const prompt = prompts[index], item = items[index];
         const slot = String(item.orderInGroup || index + 1).padStart(2, '0');
@@ -598,6 +641,21 @@ async function runStageTwo() {
         const nextNumber = Math.max(Number(naming.start) || 1, (sequence.last || 0) + 1, Math.max(0, ...historicalNumbers) + 1);
         const filenameBase = `${productName}-${naming.mode === 'sequence' ? String(nextNumber).padStart(3, '0') : Core.safe(prompt.number)}`;
         const historyKey = `${prompt.id}:${output.key}`;
+        if (output.downloadMethod === 'doubao-save') {
+          const armed = await chrome.runtime.sendMessage({ type: 'GPT_NATIVE_DOWNLOAD_ARM', filenameBase: `AI图片工作流/${productName}/成图/${filenameBase}`, key: historyKey });
+          if (!armed?.ok) throw new Error(armed?.error || '无法准备豆包原图保存');
+          const saved = await messageTab(tabId, { type: 'GPT_DOUBAO_SAVE', key: output.key });
+          if (!saved?.ok) throw new Error(saved?.error || '豆包原图保存失败');
+          const deadline = Date.now() + 60000;
+          let complete = false;
+          while (Date.now() < deadline) {
+            const status = await chrome.runtime.sendMessage({ type: 'GPT_NATIVE_DOWNLOAD_STATUS', token: armed.token });
+            if (status.job?.state === 'complete') { complete = true; break; }
+            if (status.job?.state === 'error') throw new Error(status.job.error || '豆包下载失败');
+            await sleep(500);
+          }
+          if (!complete) throw new Error('等待豆包原图保存超时');
+        } else {
         const result = await chrome.runtime.sendMessage({
           type: 'GPT_IMAGE_DOWNLOAD',
           images: [{ url: dataUrl || output.url, key: output.key, mime, filenameBase, historyKey, order: index + 1 }],
@@ -605,6 +663,7 @@ async function runStageTwo() {
         });
         if (!result?.ok) throw new Error(result?.error || `第 ${index + 1} 张下载任务创建失败`);
         await waitDownload(result.jobId);
+        }
         if (naming.mode === 'sequence') {
           await DB.put('settings', { id: sequenceKey, last: nextNumber, files: [...(sequence.files || []), { name: filenameBase, createdAt: Date.now() }] });
         }
@@ -627,7 +686,7 @@ async function runStageTwo() {
       for (const item of items) if (item.status !== '完成') {
         item.retryCount = (item.retryCount || 0) + 1;
         // 网页明确报告生成失败才允许重新提交；超时、下载失败继续读取原请求结果。
-        if (/ChatGPT 本轮生图失败/.test(error.message)) delete item.stage;
+        if (/AI 本轮生图失败/.test(error.message)) delete item.stage;
         item.status = `等待自动重试（${item.retryCount}）`;
       }
       const attempts = Math.max(...items.map(item => item.retryCount || 0));
@@ -729,8 +788,14 @@ document.addEventListener('click', event => {
 });
 $('#refresh-prompt-tabs').addEventListener('click', () => refreshTabs($('#prompt-tab')));
 $('#refresh-image-tabs').addEventListener('click', () => refreshTabs($('#image-tab')));
+$('#prompt-mode').addEventListener('change', () => {
+  const single = $('#prompt-mode').value === 'single-image';
+  $('#reverse-image-inputs').hidden = !single;
+  $('#reference-image-inputs').hidden = single;
+  $('#reference-batch-size').closest('label').hidden = single;
+});
 $('#build-prompt-batches').addEventListener('click', () => { try { buildPromptBatchPlan(); } catch (error) { log(error.message); } });
-for (const input of [$('#product-images'), $('#reference-images'), $('#reference-batch-size')]) {
+for (const input of [$('#product-images'), $('#reference-images'), $('#reference-batch-size'), $('#prompt-mode'), $('#reverse-images')]) {
   input.addEventListener('change', () => {
     state.stageOnePlan = null;
     $('#prompt-batch-preview').innerHTML = '<p>素材或批次大小已改变，请重新生成批次列表。</p>';
@@ -745,7 +810,8 @@ $('#run-stage-one').addEventListener('click', async () => {
     setStageOneButton('提示词已保存', true);
   } catch (error) {
     log(`第一阶段失败：${error.message}`);
-    showView('logs');
+    await loadAll();
+    showView('prepare');
     setStageOneButton('重试生成提示词', false);
   }
 });
@@ -770,7 +836,7 @@ $('#use-local-prompts-now').addEventListener('click', async () => {
   try {
     await importLocalPrompts();
     await queueSelected();
-    log('本机提示词已直接解析并加入生图任务；请选择 ChatGPT 生图页面后开始。');
+    log('本机提示词已直接解析并加入生图任务；请选择 ChatGPT 或豆包生图页面后开始。');
   } catch (error) {
     log(`直接使用本机提示词失败：${error.message}`);
   } finally {
@@ -817,9 +883,128 @@ $('#clear-log').addEventListener('click', () => { $('#log').textContent = ''; lo
 
 async function initializeWorkflow() {
   setupSimpleWorkbench();
+  setupPromptRecovery();
+  await setupInstructionTemplates();
   $('#pause-queue').disabled = true;
   await Promise.all([loadAll(), refreshTabs($('#prompt-tab')), refreshTabs($('#image-tab'))]);
   await recoverPendingPromptBatches();
+}
+async function setupInstructionTemplates() {
+  const editor = $('#prompt-instruction');
+  const defaults = editor.value;
+  let settings = await DB.get('settings', 'instruction-templates') || { id: 'instruction-templates', items: [], selected: '', draft: defaults };
+  const box = document.createElement('div'); box.className = 'queue-actions';
+  box.innerHTML = '<label>高级提示词模板<select id="instruction-template-select"></select></label><label>模板名称<input id="instruction-template-name" placeholder="例如：纯净反推"></label><button id="instruction-template-save" type="button">保存修改</button><button id="instruction-template-copy" type="button" class="secondary">另存为新模板</button><button id="instruction-template-delete" type="button" class="secondary">删除所选模板</button><span id="instruction-template-status"></span>';
+  editor.closest('label').before(box);
+  const select = $('#instruction-template-select'), name = $('#instruction-template-name'), status = $('#instruction-template-status');
+  const persist = () => DB.put('settings', settings);
+  const render = () => {
+    select.innerHTML = '<option value="">草稿 / 新模板</option><option value="default">内置默认</option>' + settings.items.map(item => `<option value="${item.id}">${escapeHtml(item.name)}</option>`).join('');
+    select.value = settings.selected || '';
+    name.value = settings.items.find(item => item.id === settings.selected)?.name || '';
+  };
+  editor.value = settings.draft ?? defaults; render();
+  editor.addEventListener('input', async () => {
+    settings = { ...settings, draft: editor.value };
+    await persist(); status.textContent = '草稿已自动保存；点击保存修改更新模板';
+  });
+  select.addEventListener('change', async () => {
+    // 离开前保留编辑稿，切换回来也可继续修改。
+    const old = settings.items.find(item => item.id === settings.selected);
+    if (old) old.draft = editor.value;
+    else settings.freeDraft = editor.value;
+    settings.selected = select.value;
+    const item = settings.items.find(item => item.id === settings.selected);
+    editor.value = settings.selected === 'default' ? defaults : item ? item.draft ?? item.text : settings.freeDraft ?? '';
+    settings.draft = editor.value; render(); await persist(); status.textContent = '已切换并保存选择';
+  });
+  const save = async copy => {
+    if (!name.value.trim()) { status.textContent = '请填写模板名称'; return; }
+    if (!editor.value.trim()) { status.textContent = '模板内容不能为空'; return; }
+    let item = !copy && settings.items.find(item => item.id === settings.selected);
+    if (!item) { item = { id: Core.uuid() }; settings.items.push(item); }
+    Object.assign(item, { name: name.value.trim(), text: editor.value, draft: editor.value, updatedAt: Date.now() });
+    settings.selected = item.id; settings.draft = editor.value; await persist(); render(); status.textContent = '模板已保存到浏览器本地';
+  };
+  $('#instruction-template-save').addEventListener('click', () => save(false).catch(error => log(error.message)));
+  $('#instruction-template-copy').addEventListener('click', () => save(true).catch(error => log(error.message)));
+  $('#instruction-template-delete').addEventListener('click', async () => {
+    if (!settings.items.some(item => item.id === settings.selected)) { status.textContent = '请选择自定义模板'; return; }
+    settings.items = settings.items.filter(item => item.id !== settings.selected);
+    settings.selected = ''; settings.draft = editor.value; settings.freeDraft = editor.value;
+    await persist(); render(); status.textContent = '模板已删除，当前文字保留为草稿';
+  });
+}
+async function archivePromptRun() {
+  const run = await DB.get('settings', 'prompt-run');
+  if (!run || run.complete) return false;
+  const archivedAt = Date.now();
+  await DB.put('settings', { ...run, id: 'prompt-run-archive:' + archivedAt, archivedAt });
+  for (const item of run.plan?.batches || []) {
+    const batch = await DB.get('batches', item.batchId);
+    if (batch && batch.status !== 'prompts-ready') await DB.put('batches', { ...batch, status: 'archived-prompts', archivedAt });
+  }
+  await DB.put('settings', { ...run, complete: true, archivedAt });
+  return true;
+}
+function setupPromptRecovery() {
+  const entry = document.createElement('button');
+  entry.textContent = '生成提示词 / 恢复任务';
+  entry.addEventListener('click', async () => {
+    if (document.body.classList.contains('simple-mode')) $('#open-advanced').click();
+    showView('prepare');
+    await loadAll();
+    const run = await DB.get('settings', 'prompt-run');
+    $('#prompt-recovery-status').textContent = run && !run.complete
+      ? `待恢复：${run.product.name}，共 ${run.plan.batches.length} 批。请选择原对话页面，再继续读取回复。`
+      : '没有已保存的未完成任务。旧版本任务可尝试“读取原页面回复”。';
+  });
+  $('.app-header').appendChild(entry);
+  const navEntry = document.createElement('button'); navEntry.dataset.view = 'prepare'; navEntry.textContent = '生成提示词'; $('#nav').prepend(navEntry);
+  const panel = document.createElement('div'); panel.className = 'setting-card';
+  panel.innerHTML = '<div><h3>提示词任务恢复与保存</h3><p>素材和批次保存在当前浏览器扩展的本地数据库，关闭工作台后可重新进入。已生成内容在“提示词库”；导出选中 Markdown 后保存在下载目录 AI提示词，知识库需在设置中授权并同步。不要卸载插件或清除扩展数据。</p><p id="prompt-recovery-status">失败后选择原对话页面，先读取已有回复。未确认发送的批次不会自动重发。</p><button id="resume-prompt-run">继续已保存任务</button> <button id="read-prompt-replies" class="secondary">读取原页面回复</button> <button id="resend-prompt-batch" class="secondary">确认未发送，重新发送当前批次</button> <button id="archive-prompt-run" class="secondary">结束旧任务，允许新建</button><p>结束旧任务会停止自动恢复该任务，保留已有提示词和素材；网页正在生成的回复不会被取消。</p></div>';
+  $('#prepare').prepend(panel);
+  let busy = false;
+  const resume = async (resend = false) => {
+    if (busy || $('#run-stage-one').disabled) return;
+    busy = true; setStageOneButton('正在恢复…');
+    try {
+      const run = await DB.get('settings', 'prompt-run');
+      if (!run || run.complete) throw new Error('没有可继续的已保存任务；旧版本失败任务请先读取原页面回复');
+      if (resend) {
+        for (const item of run.plan.batches) {
+          const batch = await DB.get('batches', item.batchId);
+          if (batch.status === 'prompts-ready') continue;
+          await DB.put('batches', { ...batch, status: 'queued-prompts', baseline: null }); break;
+        }
+      }
+      await runStageOne(true);
+      $('#prompt-recovery-status').textContent = '任务已完成，提示词已保存到提示词库。';
+    } catch (error) { log(`恢复提示词任务：${error.message}`); $('#prompt-recovery-status').textContent = error.message; }
+    finally { busy = false; setStageOneButton('生成并保存提示词', false); }
+  };
+  $('#archive-prompt-run').addEventListener('click', async () => {
+    if (busy || $('#run-stage-one').disabled) return;
+    busy = true;
+    try {
+      const archived = await archivePromptRun();
+      await loadAll();
+      const text = archived ? '旧任务已结束，已有提示词和素材已保留。可使用下方新选的图片开始新任务。' : '没有需要结束的旧任务，可以开始新任务。';
+      $('#prompt-recovery-status').textContent = text; log(text);
+    } catch (error) { log('结束旧任务失败：' + error.message); }
+    finally { busy = false; }
+  });
+  $('#resume-prompt-run').addEventListener('click', () => resume());
+  $('#resend-prompt-batch').addEventListener('click', () => resume(true));
+  $('#read-prompt-replies').addEventListener('click', async () => {
+    if (busy || $('#run-stage-one').disabled) return;
+    await loadAll();
+    const tabId = Number($('#prompt-tab').value);
+    if (!tabId) { log('请先选择原对话页面'); return; }
+    for (const batch of state.batches.filter(batch => batch.status === 'sending-prompts')) await DB.put('batches', { ...batch, promptTabId: tabId });
+    await loadAll(); await recoverPendingPromptBatches(true);
+    $('#prompt-recovery-status').textContent = '已检查原页面回复。已完成且编号匹配的回复会保存到提示词库；仍在生成的请稍后再读。';
+  });
 }
 function setupSimpleWorkbench() {
   setupOutputNaming();
@@ -905,12 +1090,20 @@ function setupDiskLibrary() {
   entry.addEventListener('click', () => { panel.open = true; panel.scrollIntoView({ behavior: 'smooth', block: 'start' }); });
   const roots = {};
   let filter = 'all';
+  const controls = document.createElement('div'); controls.className = 'queue-actions';
+  const folder = document.createElement('select'); folder.setAttribute('aria-label', '按文件夹筛选'); folder.innerHTML = '<option value="">全部文件夹</option>';
+  const search = document.createElement('input'); search.placeholder = '搜索产品、文件夹或文件名'; search.setAttribute('aria-label', '搜索扫描结果');
+  const count = document.createElement('span');
+  controls.append(folder, search, count); $('#disk-list').before(controls);
   const tabs = document.createElement('nav'); tabs.className = 'disk-filters';
   const applyFilter = () => {
-    for (const item of panel.querySelectorAll('.disk-file')) item.hidden = filter !== 'all' && item.dataset.state !== filter;
+    const query = search.value.trim().toLocaleLowerCase();
+    for (const item of panel.querySelectorAll('.disk-file')) item.hidden = (filter !== 'all' && item.dataset.state !== filter) || (folder.value && item.dataset.folder !== folder.value && !item.dataset.folder.startsWith(folder.value + '/')) || (query && !item.dataset.path.toLocaleLowerCase().includes(query));
     for (const card of panel.querySelectorAll('.disk-row')) card.hidden = ![...card.querySelectorAll('.disk-file')].some(item => !item.hidden);
     for (const button of tabs.querySelectorAll('button')) button.classList.toggle('active', button.dataset.filter === filter);
+    count.textContent = `显示 ${[...panel.querySelectorAll('.disk-file')].filter(item => !item.hidden).length} 个文件`;
   };
+  folder.addEventListener('change', applyFilter); search.addEventListener('input', applyFilter);
   for (const [value, label] of [['all', '全部提示词'], ['todo', '未生图提示词'], ['done', '已生图提示词']]) {
     const button = document.createElement('button'); button.textContent = label; button.dataset.filter = value;
     button.addEventListener('click', () => { filter = value; applyFilter(); }); tabs.appendChild(button);
@@ -949,11 +1142,23 @@ function setupDiskLibrary() {
       const imageFiles = await walk(roots.images);
       const images = imageFiles.filter(file => (roots.images.name === '产品图' || /(?:^|\/)产品图\//.test(file.path)) && /\.(png|jpe?g|webp)$/i.test(file.path));
       const groups = new Map();
-      for (const file of notes.filter(file => /(?:^|\/)[^/]*提示词[^/]*\.(md|markdown|txt)$/i.test(file.path))) {
-        const key = file.path.slice(0, file.path.lastIndexOf('/'));
+      for (const file of notes.filter(file => /\.(md|markdown|txt)$/i.test(file.path))) {
+        const content = await (await file.handle.getFile()).text();
+        if (!Core.isPromptLibraryFile(file.path, content)) continue;
+        file.content = content;
+        const key = file.path.includes('/') ? file.path.slice(0, file.path.lastIndexOf('/')) : '';
         if (!groups.has(key)) groups.set(key, []); groups.get(key).push(file);
       }
-      for (const [path, files] of groups) {
+      const oldFolder = folder.value;
+      folder.replaceChildren(new Option('全部文件夹', ''));
+      const paths = new Set();
+      for (const path of groups.keys()) {
+        const parts = path.split('/').filter(Boolean);
+        parts.forEach((_, index) => paths.add(parts.slice(0, index + 1).join('/')));
+      }
+      for (const path of [...paths].sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true }))) folder.add(new Option(path, path));
+      if (paths.has(oldFolder)) folder.value = oldFolder;
+      for (const [path, files] of [...groups].sort(([a], [b]) => a.localeCompare(b, 'zh-CN', { numeric: true }))) {
         files.sort((a, b) => a.path.localeCompare(b.path, 'zh-CN', { numeric: true }));
         const parts = path.split('/').filter(Boolean);
         const product = (parts[0] === 'AI图片工作流' ? parts[1] : parts[0]) || roots.notes.name;
@@ -961,11 +1166,12 @@ function setupDiskLibrary() {
         const title = document.createElement('strong'); title.textContent = `${path}（${files.length}个提示词文件）`;
         const fileList = document.createElement('div'); fileList.className = 'disk-file-list';
         for (const file of files) {
-          const content = await (await file.handle.getFile()).text();
+          const content = file.content;
           const first = content.replace(/^\uFEFF/, '').split(/\r?\n/).find(line => line.trim()) || '';
           const marked = /^\s*(?:#{1,6}\s*)?已生图\s*$/.test(first);
           file.done = marked;
           const item = document.createElement('div'); item.className = 'disk-file'; item.dataset.state = file.done ? 'done' : 'todo';
+          item.dataset.folder = path; item.dataset.path = file.path;
           const label = document.createElement('label');
           const check = document.createElement('input'); check.type = 'checkbox'; check.checked = !file.done; file.check = check;
           const name = document.createElement('span'); name.textContent = `${file.path.split('/').at(-1)} · ${Core.parseNumberedPrompts(content).length}条`;

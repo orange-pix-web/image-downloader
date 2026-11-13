@@ -197,12 +197,22 @@ function doubaoImageKey(url) {
   }
 }
 
+function doubaoImageNodes() {
+  return Array.from(document.querySelectorAll('img')).filter((img) => {
+    if (img.closest('[data-message-role="user"], [data-testid="send_message"], [data-testid="chat_input"]')) return false;
+    const url = img.currentSrc || img.src || '';
+    if (!/^https?:/i.test(url)) return false;
+    const generated = /rc_gen_image(?:\/|%2f)/i.test(url);
+    const assistant = img.closest('[data-message-role="assistant"], [data-testid="receive_message"]');
+    const shortLink = /^https:\/\/aka\.doubaocdn\.com\/s\//i.test(url);
+    if (!generated && !(assistant && shortLink)) return false;
+    if (img.closest('[data-finished="false"], [data-streaming="true"]')) return false;
+    return img.complete !== false && img.naturalWidth !== 0;
+  });
+}
+
 function getDoubaoGeneratedImages() {
-  const selectors = [
-    '.image-box-grid-EYaIcP[data-finished="true"] img.image-Q7dBqW[src*="rc_gen_image"]',
-    'img.image-Q7dBqW[src^="https://aka.doubaocdn.com/s/"]'
-  ];
-  const candidates = Array.from(document.querySelectorAll(selectors.join(",")));
+  const candidates = doubaoImageNodes();
   const seen = new Set();
   const images = [];
 
@@ -1011,14 +1021,21 @@ function setTextareaValue(textarea, value) {
 
 async function uploadAndSendDoubao(images, prompt) {
   if (!images.length) throw new Error("没有收到待上传图片");
-  const uploads = Array.from(document.querySelectorAll('input[type="file"][multiple]'));
+  const scope = document.querySelector('[data-testid="chat_input"]') || document;
+  const uploads = Array.from(scope.querySelectorAll('input[type="file"]'));
   const upload =
+    scope.querySelector('input[data-testid="upload-file-input"]') ||
     uploads.find((input) => /\.(png|jpe?g|webp)/i.test(input.accept || "")) ||
     uploads[0];
   const editor =
-    document.querySelector('.tiptap.ProseMirror[contenteditable="true"]') ||
-    document.querySelector('textarea[placeholder="发消息..."]');
+    scope.querySelector('[data-testid="chat_input_input"] [contenteditable="true"]') ||
+    scope.querySelector('.tiptap.ProseMirror[contenteditable="true"]') ||
+    scope.querySelector('textarea[placeholder*="发消息"]');
   if (!upload || !editor) throw new Error("找不到豆包上传控件或提示词输入框");
+  if (doubaoGenerating()) throw new Error('豆包仍在生成，请等待当前回复完成');
+  if ((editor.value || editor.innerText || editor.textContent || '').trim()) throw new Error('豆包输入框已有内容，请先发送或清空后再执行');
+  const userMessageKeys = () => Array.from(document.querySelectorAll('[data-testid="send_message"] [data-message-id]')).map(node => node.getAttribute('data-message-id'));
+  const beforeMessages = new Set(userMessageKeys());
 
   const files = await Promise.all(images.map((image) => dataUrlToFile(image.dataUrl, image.name, image.type)));
   const transfer = new DataTransfer();
@@ -1031,10 +1048,15 @@ async function uploadAndSendDoubao(images, prompt) {
   if (editor instanceof HTMLTextAreaElement) {
     setTextareaValue(editor, prompt);
   } else {
-    document.execCommand("selectAll", false);
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    selection.removeAllRanges();
+    selection.addRange(range);
     document.execCommand("insertText", false, prompt);
   }
   await sleep(600);
+  if (normalizedPromptText(editor.value || editor.innerText || editor.textContent || '') !== normalizedPromptText(prompt)) throw new Error('豆包提示词写入未确认，已停止发送');
 
   editor.dispatchEvent(new KeyboardEvent("keydown", {
     key: "Enter",
@@ -1051,13 +1073,39 @@ async function uploadAndSendDoubao(images, prompt) {
     which: 13,
     bubbles: true
   }));
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    await sleep(300);
+    const cleared = !(editor.value || editor.innerText || editor.textContent || '').trim();
+    if (cleared && (userMessageKeys().some(key => !beforeMessages.has(key)) || doubaoGenerating())) return;
+  }
+  throw new Error('豆包发送未确认，请检查网页是否已收到本条，再继续任务，避免重复发送');
+}
+
+function doubaoAssistantMessages() {
+  return Array.from(document.querySelectorAll('[data-testid="receive_message"], [data-message-role="assistant"]'))
+    .filter(node => node.isConnected && node.getClientRects().length)
+    .map((node, index) => {
+      const content = node.querySelector('[data-testid="message_content"]');
+      const blocks = Array.from(node.querySelectorAll('[data-testid="message_text_content"]'));
+      return {
+        key: content?.getAttribute('data-message-id') || node.getAttribute('data-message-id') || `doubao-assistant-${index}`,
+        text: blocks.map(block => (block.innerText || block.textContent || '').trim()).filter(Boolean).join('\n\n')
+      };
+    }).filter(message => message.text);
 }
 
 function doubaoGenerating() {
-  return Boolean(
-    document.querySelector('[data-streaming="true"]') ||
-    document.querySelector('.image-box-grid-EYaIcP:not([data-finished="true"])')
-  );
+  const visible = node => node.isConnected && node.getClientRects().length > 0;
+  const scope = document.querySelector('[data-testid="chat_input"]');
+  const buttons = Array.from((scope || document).querySelectorAll('button, [role="button"]'));
+  if (buttons.some(button => visible(button) && (
+    /停止|stop|取消生成/i.test([button.getAttribute('aria-label'), button.getAttribute('title'), button.getAttribute('data-testid')].join(' ')) ||
+    button.querySelector('svg use[href*="stop"], svg use[xlink\\:href*="stop"], [data-icon*="stop"], [class*="stop-icon"], [class*="icon-stop"]')
+  ))) return true;
+  const replies = Array.from(document.querySelectorAll('[data-testid="receive_message"], [data-message-role="assistant"]')).filter(visible);
+  const latest = replies.at(-1);
+  return Boolean(latest?.querySelector('[data-streaming="true"], [data-finished="false"], [aria-busy="true"]'));
 }
 
 async function saveDoubaoImage(key) {
@@ -1067,24 +1115,19 @@ async function saveDoubaoImage(key) {
 
   const target = getDoubaoGeneratedImages().find((image) => image.key === key);
   if (!target) throw new Error("找不到待保存的豆包生成图");
-  const allImages = Array.from(
-    document.querySelectorAll(
-      'img.image-Q7dBqW[src*="rc_gen_image"],' +
-      'img.image-Q7dBqW[src^="https://aka.doubaocdn.com/s/"]'
-    )
-  );
+  const allImages = doubaoImageNodes();
   const img = allImages.find((element) => doubaoImageKey(element.currentSrc || element.src) === key);
   if (!img) throw new Error("找不到豆包图片节点");
-  (img.closest(".clickable-axeVcZ") || img).click();
+  (img.closest('[class*="clickable-"]') || img).click();
 
   const deadline = Date.now() + 10000;
   let saveButton = null;
   while (Date.now() < deadline) {
-    const preview = document.querySelector('[data-visible="true"] [data-marker-preview-image="true"]');
+    const preview = document.querySelector('[data-visible="true"] [data-marker-preview-image="true"], [role="dialog"] [data-marker-preview-image="true"]');
     if (preview) {
       saveButton = Array.from(
-        preview.closest('[data-visible="true"]')?.querySelectorAll("button") || []
-      ).find((button) => button.textContent.trim() === "保存");
+        preview.closest('[data-visible="true"], [role="dialog"]')?.querySelectorAll('button, [role="button"]') || []
+      ).find((button) => /^(保存|下载|保存图片|下载原图)$/.test((button.getAttribute('aria-label') || button.textContent).trim()) && !button.disabled);
       if (saveButton) break;
     }
     await sleep(200);
@@ -1153,8 +1196,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.type === "GPT_WORKFLOW_ASSISTANT_STATE") {
-    const messages = chatGptAssistantMessages();
-    sendResponse({ ok: true, generating: chatGptGenerating(), messages, latest: messages.at(-1) || null });
+    const isDoubao = location.hostname === 'www.doubao.com';
+    const messages = isDoubao ? doubaoAssistantMessages() : chatGptAssistantMessages();
+    sendResponse({ ok: true, platform: isDoubao ? 'doubao' : 'chatgpt', conversationUrl: location.origin + location.pathname, generating: isDoubao ? doubaoGenerating() : chatGptGenerating(), messages, latest: messages.at(-1) || null });
     return;
   }
 
