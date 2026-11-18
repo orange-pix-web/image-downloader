@@ -35,6 +35,21 @@
     if (!source) return [];
     const bracketMarker = /(?:^|\n)\s*(?:#{1,6}\s*)?【\s*(?:第\s*\d{1,4}\s*张\s*[｜|]\s*)?(?:生图\s*)?提示词\s*(\d{1,4})(?:\s*[｜|]\s*[^】\n]*)?\s*】\s*/g;
     const numberedMarker = /(?:^|\n)\s*(?:#{1,4}\s*)?(?:提示词\s*)?(\d{1,4})\s*[.、:：)）-]\s*/g;
+    // Markdown bundles contain shared constraints before individually titled prompts.
+    const headingMarker = /^#{1,6}[ \t]+(?:生图\s*)?提示词\s*(\d{1,4})(?:[ \t]*[｜|][^\r\n]*)?[ \t]*\r?$/gm;
+    const headingHits = [...source.matchAll(headingMarker)];
+    if (headingHits.length) {
+      const cleanBundle = value => value.split(/\r?\n/).filter(line =>
+        !/^\s*(?:```(?:text|markdown)?|---|已生图)\s*$/i.test(line) &&
+        !/^\s*(?:>\s*)?(?:使用方法[：:]|分别参照以下\s*\d+\s*套提示词|请按模板编号|如果某一张失败)/.test(line)
+      ).join('\n').trim();
+      const prefix = source.slice(0, headingHits[0].index);
+      const shared = cleanBundle(prefix.replace(/^#(?!#)[ \t]+[^\r\n]*网页版[^\r\n]*\r?\n?/, ''));
+      return headingHits.map((hit, index) => ({
+        number: hit[1],
+        text: [shared, cleanBundle(source.slice(hit.index + hit[0].length, headingHits[index + 1]?.index ?? source.length))].filter(Boolean).join('\n\n')
+      })).filter(item => item.text);
+    }
     const bracketHits = [...source.matchAll(bracketMarker)];
     const hits = bracketHits.length ? bracketHits : [...source.matchAll(numberedMarker)];
     if (!hits.length) return [{ number: "1", text: source }];

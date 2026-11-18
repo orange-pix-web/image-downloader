@@ -114,3 +114,18 @@ test('Vault Markdown 包含 UUID、嵌入与双向链接', () => {
   assert.match(md, /\[\[产品-A\]\]/);
   assert.match(core.vaultPaths(product, batch, prompt).prompt, /07-prompt-uuid\.md$/);
 });
+
+
+test('Markdown 批量文档按标题拆分并保留公共约束', () => {
+  const source = '# 产品｜网页版一次批量生图提示词\n已生图\n> 使用方法：复制全部内容。\n\n~~~\n【系统约束改版开始】\n使用自然光。\n【系统约束改版结束】\n分别参照以下2套提示词，生成2张图片。\n---\n# 产品统一约束\n保持包装250ml。\n# 提示词101｜方案一\n第一张布局，1:1。\n---\n# 提示词107｜方案二\n第二张布局。\n请按模板编号【101、107】生成2张图片。\n如果某一张失败，可单独补生。'.replace('~~~', '\x60\x60\x60text');
+  const result = core.parseNumberedPrompts(source);
+  assert.deepEqual(result.map(p => p.number), ['101', '107']);
+  for (const item of result) {
+    assert.match(item.text, /使用自然光/);
+    assert.match(item.text, /保持包装250ml/);
+    assert.doesNotMatch(item.text, /使用方法|分别参照以下|请按模板编号|如果某一张失败|已生图|网页版/);
+    assert.match(core.generationBatchPrompt([item], '', false), /本次只生成一张/);
+  }
+  assert.doesNotMatch(result[0].text, /第二张布局/);
+  assert.doesNotMatch(result[1].text, /第一张布局/);
+});
